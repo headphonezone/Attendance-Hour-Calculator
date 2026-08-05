@@ -97,6 +97,51 @@ def get_month_sundays(year, month):
     total = calendar.monthrange(year, month)[1]
     return [d for d in range(1, total + 1) if date(year, month, d).weekday() == 6]
 
+# ── Salary Master parsing ──────────────────────────────────────────────
+# Reusable file (ID, Monthly Salary columns, header row optional) so the
+# user only maintains one small sheet and re-uploads it every month
+# instead of retyping salaries for every employee each time.
+def parse_salary_file(uploaded_file):
+    salary_map = {}
+    name = (uploaded_file.name or "").lower()
+    try:
+        if name.endswith(".csv"):
+            import csv as _csv
+            content = uploaded_file.getvalue().decode("utf-8-sig")
+            reader  = _csv.reader(content.splitlines())
+            rows    = list(reader)
+        else:
+            wb   = openpyxl.load_workbook(uploaded_file, read_only=True)
+            ws   = wb[wb.sheetnames[0]]
+            rows = list(ws.iter_rows(values_only=True))
+
+        for row in rows:
+            if not row or len(row) < 2:
+                continue
+            emp_id, salary = row[0], row[1]
+            if emp_id is None or salary is None:
+                continue
+            emp_id = str(emp_id).strip()
+            try:
+                salary = float(salary)
+            except (TypeError, ValueError):
+                continue
+            if emp_id and emp_id.lower() not in ("id", "employee id") and salary > 0:
+                salary_map[emp_id] = salary
+    except Exception:
+        pass
+    return salary_map
+
+def make_salary_template():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Salary Master"
+    ws.append(["ID", "Monthly Salary"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
 def parse_logs_sheet(ws):
     all_rows   = list(ws.iter_rows(values_only=True))
     period_str = ""
@@ -374,15 +419,17 @@ def write_summary_sheet(wb, employees_dec, emp_order, raw_records,
 # ── CHANGE 3: Net split into Net Hours (number) + Status (label) ──────────────
 def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_str,
                               year, month, daily_target, part_time_list, pt_daily_target,
-                              holiday_dates, wfh_records, row_map):
+                              holiday_dates, wfh_records, row_map, salary_map=None):
     ws = wb.create_sheet("Consolidated Report")
+    salary_map = salary_map or {}
 
     headers = [
         "ID", "Employee Name",
         "Total Hours", "Total Target", "Total Excess", "Total Shortage",
         "Net Hours",    # G — number only (positive=excess, negative=shortage)
         "Status",       # H — "Excess" / "Shortage" / "On Target"
-        "Days Worked", "Leave Days", "Holidays on Leave", "Sundays", "Holidays"
+        "Days Worked", "Leave Days", "Holidays on Leave", "Sundays", "Holidays",
+        "Monthly Salary", "Calculated Salary"
     ]
     num_cols = len(headers)
 
@@ -461,6 +508,21 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         leave_days        = get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records)
         holidays_on_leave = get_holidays_on_leave(uid, raw_records, year, month, holiday_dates, wfh_records)
 
+        wk_dict          = employees_dec[uid]
+        current_daily     = pt_daily_target if uid in part_time_list else daily_target
+        total_hours_dec   = sum(sum(d.values()) for d in wk_dict.values())
+        total_target_dec  = sum(get_week_target(wk, year, month, current_daily) for wk in wk_dict)
+        net               = round(total_hours_dec - total_target_dec, 2)
+
+        # Salary: per_hour = Monthly Salary / Total Target hours;
+        # Calculated Salary = per_hour * (Total Hours + Net Hours)
+        monthly_salary = salary_map.get(str(emp_id).strip())
+        if monthly_salary and total_target_dec > 0:
+            per_hour           = monthly_salary / total_target_dec
+            calculated_salary  = round(per_hour * (total_hours_dec + net), 2)
+        else:
+            calculated_salary  = None
+
         vals = [
             emp_id,             # A — 1
             emp_name_title,     # B — 2
@@ -475,25 +537,22 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             holidays_on_leave,  # K — 11
             num_sundays,        # L — 12
             num_holidays,       # M — 13
+            monthly_salary,     # N — 14
+            calculated_salary,  # O — 15
         ]
-
-        wk_dict   = employees_dec[uid]
-        total_exc = sum(max(0, sum(d.values()) - get_week_target(wk, year, month,
-                         pt_daily_target if uid in part_time_list else daily_target))
-                         for wk, d in wk_dict.items())
-        total_sht = sum(max(0, get_week_target(wk, year, month,
-                         pt_daily_target if uid in part_time_list else daily_target) - sum(d.values()))
-                         for wk, d in wk_dict.items())
-        net = round(total_exc - total_sht, 2)
 
         for col, v in enumerate(vals, 1):
             c = ws.cell(row=data_row, column=col, value=v)
             if col in (3, 4, 5, 6):
                 c.number_format = TIME_FMT
+            if col in (14, 15):
+                c.number_format = "#,##0.00"
             if col in (7, 8):
                 fill_c = C_EXCESS_BG if net > 0 else (C_SHORT_BG if net < 0 else C_ALT_ROW)
             elif col == 11 and isinstance(v, int) and v > 0:
                 fill_c = C_HOLIDAY_BG
+            elif col == 15 and calculated_salary is None:
+                fill_c = C_SHORT_BG
             else:
                 fill_c = C_ALT_ROW
             c.fill, c.border, c.alignment, c.font = (
@@ -510,6 +569,8 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         ws.column_dimensions[ltr].width = 15
     for ltr in ['I', 'J', 'L', 'M']:
         ws.column_dimensions[ltr].width = 13
+    for ltr in ['N', 'O']:
+        ws.column_dimensions[ltr].width = 16
 
 def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
                            daily_target, is_part_time, pt_daily_target,
@@ -651,7 +712,7 @@ def write_wfh_sheet(wb, emp_order, raw_records, wfh_records, year, month, period
 
 def generate_report(employees_dec, emp_order, raw_records, period_str,
                     year, month, daily_target, part_time_list, pt_daily_target,
-                    holiday_dates, wfh_records):
+                    holiday_dates, wfh_records, salary_map=None):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
@@ -665,7 +726,7 @@ def generate_report(employees_dec, emp_order, raw_records, period_str,
 
     write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_str,
                               year, month, daily_target, part_time_list, pt_daily_target,
-                              holiday_dates, wfh_records, row_map)
+                              holiday_dates, wfh_records, row_map, salary_map)
 
     write_wfh_sheet(wb, emp_order, raw_records, wfh_records, year, month, period_str)
 
@@ -715,6 +776,7 @@ def main():
         ('holiday_dates', []),
         ('wfh_records',   {}),
         ('fixes',         {}),
+        ('salary_map',    {}),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
@@ -840,8 +902,48 @@ def main():
                         del st.session_state.wfh_records[uid][d]
                         st.rerun()
 
+        st.divider()
+        st.subheader("💰 Salary Settings")
+        st.caption(
+            "Upload a reusable Salary Master (columns: ID, Monthly Salary) once — "
+            "just re-upload the same file each month instead of retyping salaries. "
+            "Per-hour rate = Monthly Salary ÷ Total Target hours; "
+            "Calculated Salary = per-hour × (Total Hours + Net Hours)."
+        )
+
+        tmpl_col, upl_col = st.columns([1, 2])
+        tmpl_col.download_button(
+            "📄 Template", make_salary_template(),
+            "salary_master_template.xlsx", key="salary_template_dl"
+        )
+        salary_file = upl_col.file_uploader(
+            "Upload Salary Master", type=["xlsx", "csv"], key="salary_upload"
+        )
+        if salary_file is not None:
+            parsed = parse_salary_file(salary_file)
+            if parsed:
+                st.session_state.salary_map.update(parsed)
+                st.success(f"✅ Loaded salary for {len(parsed)} employee(s).")
+            else:
+                st.warning("⚠️ No valid ID/Salary rows found in the uploaded file.")
+
+        with st.expander("✏️ Manually set / override salaries"):
+            for uid in active_employees:
+                emp_id  = raw_records[uid]['id']
+                current = st.session_state.salary_map.get(emp_id, 0.0)
+                new_val = st.number_input(
+                    raw_records[uid]['name'].title(),
+                    min_value=0.0, value=float(current), step=500.0,
+                    key=f"salary_{uid}"
+                )
+                if new_val > 0:
+                    st.session_state.salary_map[emp_id] = new_val
+                elif emp_id in st.session_state.salary_map:
+                    del st.session_state.salary_map[emp_id]
+
     holiday_dates = st.session_state.holiday_dates
     wfh_records   = st.session_state.wfh_records
+    salary_map    = st.session_state.salary_map
 
     st.header("🔧 Fix Missing Punches")
     any_missing = False
@@ -930,12 +1032,45 @@ def main():
     else:
         st.info("No data to preview yet.")
 
+    if salary_map:
+        st.header("💰 Salary Preview")
+        salary_preview = []
+        for uid in active_employees:
+            if uid not in employees_dec:
+                continue
+            emp_id = raw_records[uid]['id']
+            monthly_salary = salary_map.get(emp_id)
+            if not monthly_salary:
+                continue
+            current_daily    = pt_daily_target if uid in part_time_list else daily_target
+            week_dict        = employees_dec[uid]
+            total_hours_dec  = sum(sum(d.values()) for d in week_dict.values())
+            total_target_dec = sum(get_week_target(wk, year, month, current_daily) for wk in week_dict)
+            net              = round(total_hours_dec - total_target_dec, 2)
+            per_hour         = monthly_salary / total_target_dec if total_target_dec > 0 else 0
+            calc_salary      = round(per_hour * (total_hours_dec + net), 2)
+            salary_preview.append({
+                "Employee":          raw_records[uid]['name'].title(),
+                "Total Hours":       decimal_to_hhmm(total_hours_dec),
+                "Total Target":      decimal_to_hhmm(total_target_dec),
+                "Net Hours":         net,
+                "Monthly Salary":    monthly_salary,
+                "Per-Hour Rate":     round(per_hour, 2),
+                "Calculated Salary": calc_salary,
+            })
+        if salary_preview:
+            st.dataframe(salary_preview, use_container_width=True)
+        missing = [raw_records[uid]['name'].title() for uid in active_employees
+                   if uid in employees_dec and not salary_map.get(raw_records[uid]['id'])]
+        if missing:
+            st.warning("⚠️ No salary set for: " + ", ".join(missing))
+
     st.header("📥 Download Final Report")
     if st.button("Generate Excel Report", type="primary"):
         buf = generate_report(
             employees_dec, active_employees, raw_records, period_str,
             year, month, daily_target, part_time_list, pt_daily_target,
-            holiday_dates, wfh_records
+            holiday_dates, wfh_records, salary_map
         )
         st.download_button(
             "⬇️ Download attendance_report.xlsx",
