@@ -1,4 +1,5 @@
 import io
+import re
 from datetime import datetime, date
 from collections import defaultdict
 import calendar
@@ -125,8 +126,25 @@ def normalize_id(val):
 # Reusable file (ID, Name, Salary columns, header row optional) so the
 # user only maintains one small sheet and re-uploads it every month
 # instead of retyping salaries for every employee each time.
+def _parse_salary_number(val):
+    """Coerce a salary cell to a float. Handles plain numbers as well as
+    text values with commas/currency symbols (e.g. "15,000", "Rs. 15000")
+    that a straight float() call would reject."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    s = re.sub(r"[^\d.\-]", "", s)
+    if not s or s in ("-", "."):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
 def parse_salary_file(uploaded_file):
-    salary_map, name_map = {}, {}
+    salary_map, name_map, skipped = {}, {}, []
     fname = (uploaded_file.name or "").lower()
     try:
         if fname.endswith(".csv"):
@@ -135,27 +153,39 @@ def parse_salary_file(uploaded_file):
             reader  = _csv.reader(content.splitlines())
             rows    = list(reader)
         else:
-            wb   = openpyxl.load_workbook(uploaded_file, read_only=True)
+            # data_only=True: if a Salary cell holds a formula (e.g. a rate
+            # lookup), read its last-saved computed value instead of the
+            # formula text, which would otherwise fail number parsing.
+            wb   = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
             ws   = wb[wb.sheetnames[0]]
             rows = list(ws.iter_rows(values_only=True))
 
-        for row in rows:
-            if not row or len(row) < 3:
+        for row_num, row in enumerate(rows, 1):
+            if not row or all(c is None for c in row):
                 continue
-            emp_id, emp_name, salary = row[0], row[1], row[2]
-            if emp_id is None or salary is None:
+            row = list(row) + [None] * max(0, 3 - len(row))
+            emp_id_raw, emp_name, salary_raw = row[0], row[1], row[2]
+
+            if emp_id_raw is None:
+                skipped.append((row_num, "—", "missing ID"))
                 continue
-            emp_id = normalize_id(emp_id)
-            try:
-                salary = float(salary)
-            except (TypeError, ValueError):
+            emp_id = normalize_id(emp_id_raw)
+            if not emp_id or emp_id.lower() in ("id", "employee id"):
                 continue
-            if emp_id and emp_id.lower() not in ("id", "employee id") and salary > 0:
-                salary_map[emp_id] = salary
-                name_map[emp_id]   = str(emp_name).strip() if emp_name else ""
-    except Exception:
-        pass
-    return salary_map, name_map
+
+            salary = _parse_salary_number(salary_raw)
+            if salary is None:
+                skipped.append((row_num, emp_id, f"unreadable salary value: {salary_raw!r}"))
+                continue
+            if salary <= 0:
+                skipped.append((row_num, emp_id, "salary is 0 or negative"))
+                continue
+
+            salary_map[emp_id] = salary
+            name_map[emp_id]   = str(emp_name).strip() if emp_name else ""
+    except Exception as e:
+        skipped.append(("?", "?", f"file read error: {e}"))
+    return salary_map, name_map, skipped
 
 def make_salary_template():
     wb = openpyxl.Workbook()
@@ -945,7 +975,7 @@ def main():
             "Upload Salary Master", type=["xlsx", "csv"], key="salary_upload"
         )
         if salary_file is not None:
-            parsed, parsed_names = parse_salary_file(salary_file)
+            parsed, parsed_names, skipped_rows = parse_salary_file(salary_file)
             if parsed:
                 st.session_state.salary_map.update(parsed)
                 st.success(f"✅ Loaded salary for {len(parsed)} employee(s).")
@@ -959,6 +989,11 @@ def main():
                     )
             else:
                 st.warning("⚠️ No valid ID/Name/Salary rows found in the uploaded file.")
+
+            if skipped_rows:
+                with st.expander(f"⚠️ {len(skipped_rows)} row(s) in the file couldn't be read"):
+                    for row_num, eid, reason in skipped_rows:
+                        st.write(f"Row {row_num} (ID: {eid}): {reason}")
 
         with st.expander("✏️ Manually set / override salaries"):
             for uid in active_employees:
