@@ -56,10 +56,10 @@ def decimal_to_hhmm(decimal_hours):
 # Excel stores time as a fraction of a 24-hour day. To show real hour
 # totals (which routinely exceed 24) as proper H:MM — 60 minutes to the
 # hour, not 100 — we store hours/24 and format the cell as elapsed time.
-# [h]:mm is unsigned; totals that can go negative (e.g. Net Hours) use the
-# two-section variant so Excel renders "-8:30" instead of "####".
-TIME_FMT        = "[h]:mm"
-TIME_FMT_SIGNED = "[h]:mm;-[h]:mm"
+# Excel cannot render a negative duration in this format at all (always
+# shows ####), so any value that can go negative (e.g. Net Hours) must be
+# built as a text label via TEXT()/"-" concatenation instead.
+TIME_FMT = "[h]:mm"
 
 def to_excel_time(decimal_hours):
     return round(decimal_hours, 4) / 24
@@ -439,16 +439,22 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         f_excess   = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{excess_col})),4)"
         f_shortage = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{shortage_col})),4)"
 
-        # G: Net Hours — pure number (day-fraction; can be negative)
+        # G: Net Hours — Excel can't render a negative [h]:mm duration
+        # (always shows ####), so build the label as text instead: positive
+        # net formats normally, negative net gets a "-" prefix on the
+        # absolute difference.
         e_col = get_column_letter(5)
         f_col = get_column_letter(6)
-        g_col = get_column_letter(7)
-        f_net_num = f"=ROUND({e_col}{data_row}-{f_col}{data_row},4)"
+        net_diff  = f"({e_col}{data_row}-{f_col}{data_row})"
+        f_net_text = (
+            f'=IF({net_diff}>=0,TEXT({net_diff},"[h]:mm"),'
+            f'"-"&TEXT(-{net_diff},"[h]:mm"))'
+        )
 
-        # H: Status label only
+        # H: Status label — based on the same excess/shortage difference
         f_status = (
-            f'=IF({g_col}{data_row}>0,"Excess",'
-            f'IF({g_col}{data_row}<0,"Shortage","On Target"))'
+            f'=IF({net_diff}>0,"Excess",'
+            f'IF({net_diff}<0,"Shortage","On Target"))'
         )
 
         days_worked       = get_days_worked(uid, raw_records, wfh_records, holiday_dates, year, month)
@@ -462,7 +468,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             f_target,           # D — 4
             f_excess,           # E — 5
             f_shortage,         # F — 6
-            f_net_num,          # G — 7  Net Hours (number)
+            f_net_text,         # G — 7  Net Hours (text label, e.g. "-8:30")
             f_status,           # H — 8  Status label
             days_worked,        # I — 9
             leave_days,         # J — 10
@@ -484,8 +490,6 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             c = ws.cell(row=data_row, column=col, value=v)
             if col in (3, 4, 5, 6):
                 c.number_format = TIME_FMT
-            elif col == 7:
-                c.number_format = TIME_FMT_SIGNED
             if col in (7, 8):
                 fill_c = C_EXCESS_BG if net > 0 else (C_SHORT_BG if net < 0 else C_ALT_ROW)
             elif col == 11 and isinstance(v, int) and v > 0:
