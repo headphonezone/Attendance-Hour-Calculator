@@ -53,6 +53,17 @@ def minutes_to_hhmm(total_minutes):
 def decimal_to_hhmm(decimal_hours):
     return minutes_to_hhmm(round(decimal_hours * 60))
 
+# Excel stores time as a fraction of a 24-hour day. To show real hour
+# totals (which routinely exceed 24) as proper H:MM — 60 minutes to the
+# hour, not 100 — we store hours/24 and format the cell as elapsed time.
+# [h]:mm is unsigned; totals that can go negative (e.g. Net Hours) use the
+# two-section variant so Excel renders "-8:30" instead of "####".
+TIME_FMT        = "[h]:mm"
+TIME_FMT_SIGNED = "[h]:mm;-[h]:mm"
+
+def to_excel_time(decimal_hours):
+    return round(decimal_hours, 4) / 24
+
 def compute_hours_from_pair(t_in_str, t_out_str):
     try:
         t_in  = datetime.strptime(t_in_str,  "%H:%M")
@@ -272,10 +283,10 @@ def write_raw_data_sheet(wb, employees_dec, emp_order, raw_records,
             ws.cell(row=row, column=2, value=raw_records[uid]['id'])
             ws.cell(row=row, column=3, value=raw_records[uid]['name'].title())
             ws.cell(row=row, column=4, value=f"Week {wk}")
-            ws.cell(row=row, column=5, value=round(wk_hrs_dec, 2))
-            ws.cell(row=row, column=6, value=round(wk_target,  2))
-            ws.cell(row=row, column=7, value=f"=MAX(0,E{row}-F{row})")
-            ws.cell(row=row, column=8, value=f"=MAX(0,F{row}-E{row})")
+            ws.cell(row=row, column=5, value=to_excel_time(wk_hrs_dec)).number_format = TIME_FMT
+            ws.cell(row=row, column=6, value=to_excel_time(wk_target)).number_format  = TIME_FMT
+            ws.cell(row=row, column=7, value=f"=MAX(0,E{row}-F{row})").number_format  = TIME_FMT
+            ws.cell(row=row, column=8, value=f"=MAX(0,F{row}-E{row})").number_format  = TIME_FMT
 
             row_map[uid][wk] = row
             row += 1
@@ -296,7 +307,7 @@ def write_summary_sheet(wb, employees_dec, emp_order, raw_records,
 
     ws.merge_cells("A2:H2")
     note = ws["A2"]
-    note.value     = "⚠️  Edit 'Hours Worked' values here — Consolidated Report updates automatically via formulas."
+    note.value     = "⚠️  Edit 'Hours Worked' values here (as H:MM, e.g. 8:30) — Consolidated Report updates automatically via formulas."
     note.font      = make_font(False, "7B3F00", 9)
     note.fill      = make_fill(C_HOLIDAY_BG)
     note.alignment = make_align()
@@ -325,10 +336,10 @@ def write_summary_sheet(wb, employees_dec, emp_order, raw_records,
             ws.cell(row=row, column=1, value=raw_records[uid]['id'])
             ws.cell(row=row, column=2, value=raw_records[uid]['name'].title())
             ws.cell(row=row, column=3, value=f"Week {wk}")
-            ws.cell(row=row, column=4, value=round(wk_hrs_dec, 2))
-            ws.cell(row=row, column=5, value=round(wk_target, 2))
-            ws.cell(row=row, column=6, value=f"=MAX(0,D{row}-E{row})")
-            ws.cell(row=row, column=7, value=f"=MAX(0,E{row}-D{row})")
+            ws.cell(row=row, column=4, value=to_excel_time(wk_hrs_dec)).number_format = TIME_FMT
+            ws.cell(row=row, column=5, value=to_excel_time(wk_target)).number_format  = TIME_FMT
+            ws.cell(row=row, column=6, value=f"=MAX(0,D{row}-E{row})").number_format  = TIME_FMT
+            ws.cell(row=row, column=7, value=f"=MAX(0,E{row}-D{row})").number_format  = TIME_FMT
             ws.cell(row=row, column=8,
                     value=f'=IF(D{row}>E{row},"EXCESS",IF(D{row}<E{row},"SHORTAGE","ON TARGET"))')
 
@@ -420,16 +431,19 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         shortage_col = f"{ws_ref}!$G$5:$G${sum_end_row}"
         crit         = f'"{emp_name_title}"'
 
-        f_hrs      = f"=ROUND(SUMIF({name_col},{crit},{hours_col}),2)"
-        f_target   = f"=ROUND(SUMIF({name_col},{crit},{target_col}),2)"
-        f_excess   = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{excess_col})),2)"
-        f_shortage = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{shortage_col})),2)"
+        # Values here are day-fractions (hours/24) so cells can be formatted
+        # as real elapsed time ([h]:mm = 60 min/hr) instead of base-10
+        # decimal. Rounding to 4 dp keeps ~0.35-second precision.
+        f_hrs      = f"=ROUND(SUMIF({name_col},{crit},{hours_col}),4)"
+        f_target   = f"=ROUND(SUMIF({name_col},{crit},{target_col}),4)"
+        f_excess   = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{excess_col})),4)"
+        f_shortage = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{shortage_col})),4)"
 
-        # G: Net Hours — pure number
+        # G: Net Hours — pure number (day-fraction; can be negative)
         e_col = get_column_letter(5)
         f_col = get_column_letter(6)
         g_col = get_column_letter(7)
-        f_net_num = f"=ROUND({e_col}{data_row}-{f_col}{data_row},2)"
+        f_net_num = f"=ROUND({e_col}{data_row}-{f_col}{data_row},4)"
 
         # H: Status label only
         f_status = (
@@ -468,6 +482,10 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
 
         for col, v in enumerate(vals, 1):
             c = ws.cell(row=data_row, column=col, value=v)
+            if col in (3, 4, 5, 6):
+                c.number_format = TIME_FMT
+            elif col == 7:
+                c.number_format = TIME_FMT_SIGNED
             if col in (7, 8):
                 fill_c = C_EXCESS_BG if net > 0 else (C_SHORT_BG if net < 0 else C_ALT_ROW)
             elif col == 11 and isinstance(v, int) and v > 0:
