@@ -1000,7 +1000,7 @@ def main():
             "Upload a reusable Salary Master (columns: ID, Name, Monthly Salary) once — "
             "just re-upload the same file each month instead of retyping salaries. "
             "Per-hour rate = Monthly Salary ÷ Total Target hours; "
-            "Calculated Salary = per-hour × (Total Hours + Net Hours)."
+            "Calculated Salary = per-hour × Total Hours Worked."
         )
 
         tmpl_col, upl_col = st.columns([1, 2])
