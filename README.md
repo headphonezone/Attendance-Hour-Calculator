@@ -8,7 +8,7 @@ Intelligent Week Numbering: Uses a custom "Calendar-Style" week logic where Week
 
 Missing Punch Detection: Automatically identifies days with single punches and provides a UI to "fix" them before generating the report.
 
-Dynamic Targets: Calculates fair weekly targets based on the number of non-Sunday working days in that specific relative week.
+Dynamic Targets: Calculates fair weekly targets based on the number of working days (Mon–Sun, all 7 days) in that specific relative week. Holidays (including Sundays) are auto-credited at each employee's daily target.
 
 Professional Reporting: Generates a single .xlsx file containing:
 
@@ -38,7 +38,7 @@ Launch the App: Run the streamlit command above to open the interface in your br
 
 Upload Data: Upload an .xlsx file containing a sheet named Logs (formatted with employee IDs and punch strings).
 
-Set Targets: Use the sidebar to adjust the Weekly Target Hours (default is 51.0).
+Set Targets: Use the sidebar to adjust the Weekly Target Hours (default is 59.5 for a 7-day week) and the Part-Time daily target (default 4 hrs).
 
 Fix Punches: If the app detects missing clock-ins or clock-outs, enter the estimated times in the provided text boxes.
 
@@ -57,7 +57,7 @@ This ensures that payroll and attendance summaries align perfectly with the cale
 Target Calculations
 The tool calculates a daily_target based on your weekly input.
 
-Example: If the Weekly Target is 51.0 hours for a 6-day week, the daily target is 8.5 hours. If Week 1 only has 3 working days (e.g., Thu, Fri, Sat), the target for that specific week is automatically set to 25.5 hours.
+Example: If the Weekly Target is 59.5 hours for a 7-day week, the daily target is 8.5 hours (8 hrs 30 min) for every day, including Sunday. Part-time employees use a separate daily target (default 4 hrs) applied the same way. If a day is marked a Holiday — including a Sunday — it is automatically credited at the employee's own daily target even with no punches recorded, and is not counted as a "day worked."
 
 📦 Project Structure
 app.py: The main Streamlit application code.

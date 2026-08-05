@@ -77,8 +77,7 @@ def get_week_target(relative_wk, year, month, daily_target):
     for d_int in range(1, 32):
         try:
             if get_week_number(d_int, year, month) == relative_wk:
-                if date(year, month, d_int).weekday() != 6:
-                    wd += 1
+                wd += 1
         except ValueError:
             break
     return round(wd * daily_target, 2)
@@ -119,7 +118,7 @@ def parse_logs_sheet(ws):
                     if not isinstance(day_num, int): continue
                     if col >= len(punch_row): continue
                     try:
-                        if date(year, month, day_num).weekday() == 6: continue
+                        date(year, month, day_num)
                     except:
                         continue
                     punches = parse_punches(punch_row[col])
@@ -132,15 +131,18 @@ def parse_logs_sheet(ws):
         i += 1
     return raw_records, emp_order, period_str, year, month
 
-# ── CHANGE 1 + 2: Skip relieved employees + inject paid holiday 8.5 hrs ──────
+# ── CHANGE 1 + 2: Skip relieved employees + inject paid holiday hrs ──────
 def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
-                         holiday_dates):
+                         holiday_dates, part_time_list=None, pt_daily_target=4.0,
+                         daily_target=8.5):
     employees_dec    = {}
     holiday_day_nums = set(hd.day for hd in holiday_dates if hd.year == year and hd.month == month)
+    part_time_list    = part_time_list or []
 
     for uid in emp_order:
         p_dict  = raw_records[uid]['punches']
         has_wfh = bool(wfh_records.get(uid, {}))
+        emp_daily_target = pt_daily_target if uid in part_time_list else daily_target
 
         # Skip relieved employees — no punches and no WFH for the entire month
         if not p_dict and not has_wfh:
@@ -171,17 +173,17 @@ def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
                 if day not in week_data.get(wk, {}):
                     week_data[wk][day] = hrs
 
-        # Inject paid holiday 8.5 hrs — credited to hours but NOT a working day.
+        # Inject paid holiday hrs (at the employee's own daily target) —
+        # credited to hours but NOT a working day. Applies to Sundays too.
         # Only fills days with no punch/WFH entry.
         for hday in holiday_day_nums:
             try:
-                if date(year, month, hday).weekday() == 6:
-                    continue   # skip Sunday holidays
+                date(year, month, hday)
             except:
                 continue
             wk = get_week_number(hday, year, month)
             if hday not in week_data.get(wk, {}):
-                week_data[wk][hday] = 8.5   # 8 hrs 30 min paid holiday
+                week_data[wk][hday] = emp_daily_target   # paid holiday
 
         if week_data:
             employees_dec[uid] = dict(week_data)
@@ -190,26 +192,23 @@ def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
 def get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records):
     total_days   = calendar.monthrange(year, month)[1]
     punched_days = set(raw_records[uid]['punches'].keys())
-    sundays      = set(get_month_sundays(year, month))
     holiday_nums = set(hd.day for hd in holiday_dates if hd.year == year and hd.month == month)
     wfh_days     = set(wfh_records.get(uid, {}).keys())
     leave = 0
     for d in range(1, total_days + 1):
-        if d in sundays or d in holiday_nums or d in wfh_days: continue
+        if d in holiday_nums or d in wfh_days: continue
         if d not in punched_days:
             leave += 1
     return leave
 
 def get_holidays_on_leave(uid, raw_records, year, month, holiday_dates, wfh_records):
     punched_days = set(raw_records[uid]['punches'].keys())
-    sundays      = set(get_month_sundays(year, month))
     wfh_days     = set(wfh_records.get(uid, {}).keys())
     count = 0
     for hd in holiday_dates:
         if hd.year != year or hd.month != month:
             continue
         d = hd.day
-        if d in sundays:    continue
         if d in wfh_days:   continue
         if d not in punched_days:
             count += 1
@@ -523,7 +522,7 @@ def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
             is_wfh     = day in wfh_dict
 
             if is_holiday:
-                fill_c, note = C_HOLIDAY_BG, "Holiday (Paid – 8.30 hrs)"
+                fill_c, note = C_HOLIDAY_BG, f"Holiday (Paid – {decimal_to_hhmm(hrs)} hrs)"
             elif is_wfh:
                 info   = wfh_dict[day]
                 fill_c = C_WFH_BG
@@ -684,10 +683,10 @@ def main():
     with st.sidebar:
         st.header("⚙️ Settings")
         target_weekly = st.number_input(
-            "Full-Time Weekly Target (hrs, 6-day week)",
-            min_value=1.0, value=51.0, step=0.5
+            "Full-Time Weekly Target (hrs, 7-day week)",
+            min_value=1.0, value=59.5, step=0.5
         )
-        daily_target = round(target_weekly / 6, 10)
+        daily_target = round(target_weekly / 7, 10)
 
         st.divider()
         st.subheader("🕑 Part-Time Settings")
@@ -700,7 +699,7 @@ def main():
 
         st.divider()
         st.subheader("🏖️ Office Holidays")
-        st.caption("8.30 hrs credited as paid holiday; not counted as a working day.")
+        st.caption("Credited at each employee's daily target (8.30 hrs full-time / part-time rate) as paid holiday, incl. Sundays; not counted as a working day.")
 
         new_holiday = st.date_input(
             "Pick holiday date",
@@ -841,7 +840,7 @@ def main():
 
     employees_dec = build_employees_dec(
         active_employees, raw_records, st.session_state.fixes, wfh_records, year, month,
-        holiday_dates
+        holiday_dates, part_time_list, pt_daily_target, daily_target
     )
 
     st.header("📊 Attendance Summary Preview")
