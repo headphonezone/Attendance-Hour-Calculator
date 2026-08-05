@@ -137,6 +137,7 @@ def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
                          daily_target=8.5):
     employees_dec    = {}
     holiday_day_nums = set(hd.day for hd in holiday_dates if hd.year == year and hd.month == month)
+    month_sundays    = set(get_month_sundays(year, month))
     part_time_list    = part_time_list or []
 
     for uid in emp_order:
@@ -185,6 +186,16 @@ def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
             if hday not in week_data.get(wk, {}):
                 week_data[wk][hday] = emp_daily_target   # paid holiday
 
+        # Auto-credit Sundays with no actual punch/WFH data — treated like a
+        # paid day off (same as a holiday) so they never register as shortage.
+        # Real Sunday punches (already added above) are left untouched.
+        for sday in month_sundays:
+            if sday in holiday_day_nums:
+                continue   # already handled by holiday injection
+            wk = get_week_number(sday, year, month)
+            if sday not in week_data.get(wk, {}):
+                week_data[wk][sday] = emp_daily_target
+
         if week_data:
             employees_dec[uid] = dict(week_data)
     return employees_dec
@@ -194,9 +205,12 @@ def get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records):
     punched_days = set(raw_records[uid]['punches'].keys())
     holiday_nums = set(hd.day for hd in holiday_dates if hd.year == year and hd.month == month)
     wfh_days     = set(wfh_records.get(uid, {}).keys())
+    sundays      = set(get_month_sundays(year, month))
     leave = 0
     for d in range(1, total_days + 1):
-        if d in holiday_nums or d in wfh_days: continue
+        # Sundays are auto-credited like a paid day off, so an unpunched
+        # Sunday is not a leave day.
+        if d in holiday_nums or d in wfh_days or d in sundays: continue
         if d not in punched_days:
             leave += 1
     return leave
@@ -214,17 +228,15 @@ def get_holidays_on_leave(uid, raw_records, year, month, holiday_dates, wfh_reco
             count += 1
     return count
 
-# ── CHANGE 2b: get_days_worked — holidays NOT counted as working days ─────────
-def get_days_worked(uid, employees_dec, wfh_records, holiday_dates, year, month):
+# ── CHANGE 2b: get_days_worked — holidays & auto-credited Sundays NOT counted
+# as working days. Based on actual raw punch/WFH data, not injected hours,
+# so an auto-credited (unpunched) Sunday never counts as a day worked —
+# only a Sunday with a real punch does.
+def get_days_worked(uid, raw_records, wfh_records, holiday_dates, year, month):
     holiday_day_nums = set(hd.day for hd in holiday_dates if hd.year == year and hd.month == month)
-    punched = set()
-    if uid in employees_dec:
-        for wk_data in employees_dec[uid].values():
-            for day, hrs in wk_data.items():
-                if hrs > 0 and day not in holiday_day_nums:
-                    punched.add(day)
-    wfh_non_holiday = {d for d in wfh_records.get(uid, {}) if d not in holiday_day_nums}
-    return len(punched | wfh_non_holiday)
+    punched_days     = {d for d, p in raw_records[uid]['punches'].items() if p} - holiday_day_nums
+    wfh_non_holiday  = {d for d in wfh_records.get(uid, {}) if d not in holiday_day_nums}
+    return len(punched_days | wfh_non_holiday)
 
 def sum_week_hours(day_dict):
     return sum(day_dict.values())
@@ -425,7 +437,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             f'IF({g_col}{data_row}<0,"Shortage","On Target"))'
         )
 
-        days_worked       = get_days_worked(uid, employees_dec, wfh_records, holiday_dates, year, month)
+        days_worked       = get_days_worked(uid, raw_records, wfh_records, holiday_dates, year, month)
         leave_days        = get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records)
         holidays_on_leave = get_holidays_on_leave(uid, raw_records, year, month, holiday_dates, wfh_records)
 
@@ -479,7 +491,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
 
 def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
                            daily_target, is_part_time, pt_daily_target,
-                           holiday_dates, wfh_records):
+                           holiday_dates, wfh_records, raw_records):
     ws_name = (uid[:28]
                .replace(":", "").replace("/", "").replace("*", "")
                .replace("?", "").replace("[", "").replace("]", "").strip())
@@ -494,6 +506,7 @@ def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
 
     holiday_day_nums = set(hd.day for hd in holiday_dates if hd.year == year and hd.month == month)
     wfh_dict         = wfh_records.get(uid, {})
+    punched_days     = set(raw_records[uid]['punches'].keys())
     current_daily    = pt_daily_target if is_part_time else daily_target
 
     row = 3
@@ -518,8 +531,10 @@ def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
             except:
                 d_str, d_name = f"Day {day}", ""
 
-            is_holiday = day in holiday_day_nums
-            is_wfh     = day in wfh_dict
+            is_holiday    = day in holiday_day_nums
+            is_wfh        = day in wfh_dict
+            is_auto_sunday = (d_name == "Sunday" and not is_holiday and not is_wfh
+                               and day not in punched_days)
 
             if is_holiday:
                 fill_c, note = C_HOLIDAY_BG, f"Holiday (Paid – {decimal_to_hhmm(hrs)} hrs)"
@@ -527,6 +542,8 @@ def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
                 info   = wfh_dict[day]
                 fill_c = C_WFH_BG
                 note   = f"WFH  {info.get('in','?')} → {info.get('out','?')}"
+            elif is_auto_sunday:
+                fill_c, note = C_HOLIDAY_BG, f"Sunday (Paid – {decimal_to_hhmm(hrs)} hrs)"
             else:
                 fill_c, note = C_ALT_ROW, ""
 
@@ -634,7 +651,7 @@ def generate_report(employees_dec, emp_order, raw_records, period_str,
         if uid in employees_dec:
             write_individual_sheet(wb, uid, employees_dec[uid], period_str, year, month,
                                    daily_target, uid in part_time_list, pt_daily_target,
-                                   holiday_dates, wfh_records)
+                                   holiday_dates, wfh_records, raw_records)
 
     sheet_order = ["Weekly Summary", "Consolidated Report", "WFH Log", RAW_SHEET]
     for uid in emp_order:
@@ -854,7 +871,7 @@ def main():
         wd           = wfh_records.get(uid, {})
         wfh_count    = len(wd)
         total_wfh_h  = sum(v.get('hours', 0.0) for v in wd.values())
-        days_worked  = get_days_worked(uid, employees_dec, wfh_records, holiday_dates, year, month)
+        days_worked  = get_days_worked(uid, raw_records, wfh_records, holiday_dates, year, month)
         leave_days   = get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records)
         hol_on_leave = get_holidays_on_leave(uid, raw_records, year, month, holiday_dates, wfh_records)
 
