@@ -326,6 +326,30 @@ def get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records):
             leave += 1
     return leave
 
+def get_leave_days_by_week(uid, raw_records, year, month, holiday_dates, wfh_records):
+    """Same definition of 'leave day' as get_leave_days, grouped by week
+    number, so a week's target can be reduced by the leave taken in it —
+    a leave day should count only as leave, not also as shortage."""
+    total_days   = calendar.monthrange(year, month)[1]
+    punched_days = set(raw_records[uid]['punches'].keys())
+    holiday_nums = set(hd.day for hd in holiday_dates if hd.year == year and hd.month == month)
+    wfh_days     = set(wfh_records.get(uid, {}).keys())
+    sundays      = set(get_month_sundays(year, month))
+    by_week = defaultdict(int)
+    for d in range(1, total_days + 1):
+        if d in holiday_nums or d in wfh_days or d in sundays: continue
+        if d not in punched_days:
+            by_week[get_week_number(d, year, month)] += 1
+    return dict(by_week)
+
+def get_effective_week_target(wk, year, month, daily_target, leave_by_week):
+    """Weekly target minus the daily target for each leave day taken that
+    week, so leave is reflected once (as leave) instead of twice (leave
+    and shortage for the same day)."""
+    base       = get_week_target(wk, year, month, daily_target)
+    leave_days = leave_by_week.get(wk, 0)
+    return round(max(0.0, base - leave_days * daily_target), 2)
+
 def get_holidays_on_leave(uid, raw_records, year, month, holiday_dates, wfh_records):
     punched_days = set(raw_records[uid]['punches'].keys())
     wfh_days     = set(wfh_records.get(uid, {}).keys())
@@ -357,7 +381,7 @@ RAW_DATA_START_ROW = 2
 
 def write_raw_data_sheet(wb, employees_dec, emp_order, raw_records,
                           year, month, daily_target, part_time_list, pt_daily_target,
-                          period_str):
+                          period_str, holiday_dates, wfh_records):
     ws = wb.create_sheet(RAW_SHEET)
     ws.sheet_state = 'hidden'
 
@@ -374,9 +398,11 @@ def write_raw_data_sheet(wb, employees_dec, emp_order, raw_records,
         current_daily = pt_daily_target if uid in part_time_list else daily_target
         week_dict     = employees_dec[uid]
         row_map[uid]  = {}
+        leave_by_week = get_leave_days_by_week(uid, raw_records, year, month,
+                                                holiday_dates, wfh_records)
 
         for wk in sorted(week_dict.keys()):
-            wk_target  = get_week_target(wk, year, month, current_daily)
+            wk_target  = get_effective_week_target(wk, year, month, current_daily, leave_by_week)
             wk_hrs_dec = sum_week_hours(week_dict[wk])
 
             ws.cell(row=row, column=1, value=uid)
@@ -395,7 +421,7 @@ def write_raw_data_sheet(wb, employees_dec, emp_order, raw_records,
 
 def write_summary_sheet(wb, employees_dec, emp_order, raw_records,
                          period_str, year, month, daily_target, part_time_list,
-                         pt_daily_target, row_map):
+                         pt_daily_target, row_map, holiday_dates, wfh_records):
     ws = wb.create_sheet("Weekly Summary")
 
     ws.merge_cells("A1:H1")
@@ -424,14 +450,16 @@ def write_summary_sheet(wb, employees_dec, emp_order, raw_records,
     for uid in emp_order:
         if uid not in employees_dec or uid not in row_map:
             continue
+        current_daily = pt_daily_target if uid in part_time_list else daily_target
+        leave_by_week = get_leave_days_by_week(uid, raw_records, year, month,
+                                                holiday_dates, wfh_records)
         for wk in sorted(employees_dec[uid].keys()):
             raw_row = row_map[uid].get(wk)
             if raw_row is None:
                 continue
 
             wk_hrs_dec    = sum_week_hours(employees_dec[uid][wk])
-            current_daily = pt_daily_target if uid in part_time_list else daily_target
-            wk_target     = get_week_target(wk, year, month, current_daily)
+            wk_target     = get_effective_week_target(wk, year, month, current_daily, leave_by_week)
 
             ws.cell(row=row, column=1, value=raw_records[uid]['id'])
             ws.cell(row=row, column=2, value=raw_records[uid]['name'].title())
@@ -565,8 +593,11 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
 
         wk_dict          = employees_dec[uid]
         current_daily     = pt_daily_target if uid in part_time_list else daily_target
+        leave_by_week     = get_leave_days_by_week(uid, raw_records, year, month,
+                                                     holiday_dates, wfh_records)
         total_hours_dec   = sum(sum(d.values()) for d in wk_dict.values())
-        total_target_dec  = sum(get_week_target(wk, year, month, current_daily) for wk in wk_dict)
+        total_target_dec  = sum(get_effective_week_target(wk, year, month, current_daily, leave_by_week)
+                                 for wk in wk_dict)
         net               = round(total_hours_dec - total_target_dec, 2)
 
         # Salary: per_hour = Monthly Salary / Total Target hours;
@@ -646,6 +677,8 @@ def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
     wfh_dict         = wfh_records.get(uid, {})
     punched_days     = set(raw_records[uid]['punches'].keys())
     current_daily    = pt_daily_target if is_part_time else daily_target
+    leave_by_week    = get_leave_days_by_week(uid, raw_records, year, month,
+                                               holiday_dates, wfh_records)
 
     row = 3
     for wk in sorted(week_dict.keys()):
@@ -692,7 +725,7 @@ def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
                 )
             row += 1
 
-        wk_target    = get_week_target(wk, year, month, current_daily)
+        wk_target    = get_effective_week_target(wk, year, month, current_daily, leave_by_week)
         wk_hrs_dec   = sum_week_hours(week_dict[wk])
         excess       = max(0.0, wk_hrs_dec - wk_target)
         shortage     = max(0.0, wk_target  - wk_hrs_dec)
@@ -773,11 +806,12 @@ def generate_report(employees_dec, emp_order, raw_records, period_str,
 
     _, row_map = write_raw_data_sheet(wb, employees_dec, emp_order, raw_records,
                                       year, month, daily_target, part_time_list,
-                                      pt_daily_target, period_str)
+                                      pt_daily_target, period_str, holiday_dates, wfh_records)
 
     _, row_map = write_summary_sheet(wb, employees_dec, emp_order, raw_records,
                                      period_str, year, month, daily_target,
-                                     part_time_list, pt_daily_target, row_map)
+                                     part_time_list, pt_daily_target, row_map,
+                                     holiday_dates, wfh_records)
 
     write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_str,
                               year, month, daily_target, part_time_list, pt_daily_target,
@@ -1067,10 +1101,12 @@ def main():
         leave_days   = get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records)
         hol_on_leave = get_holidays_on_leave(uid, raw_records, year, month, holiday_dates, wfh_records)
 
-        week_dict = employees_dec[uid]
+        week_dict     = employees_dec[uid]
+        current_daily = pt_daily_target if uid in part_time_list else daily_target
+        leave_by_week = get_leave_days_by_week(uid, raw_records, year, month,
+                                                holiday_dates, wfh_records)
         for wk in sorted(week_dict.keys()):
-            current_daily = pt_daily_target if uid in part_time_list else daily_target
-            wk_target     = get_week_target(wk, year, month, current_daily)
+            wk_target     = get_effective_week_target(wk, year, month, current_daily, leave_by_week)
             wk_hrs        = sum_week_hours(week_dict[wk])
             net           = round(wk_hrs - wk_target, 2)
             preview.append({
@@ -1112,8 +1148,11 @@ def main():
                 continue
             current_daily    = pt_daily_target if uid in part_time_list else daily_target
             week_dict        = employees_dec[uid]
+            leave_by_week    = get_leave_days_by_week(uid, raw_records, year, month,
+                                                        holiday_dates, wfh_records)
             total_hours_dec  = sum(sum(d.values()) for d in week_dict.values())
-            total_target_dec = sum(get_week_target(wk, year, month, current_daily) for wk in week_dict)
+            total_target_dec = sum(get_effective_week_target(wk, year, month, current_daily, leave_by_week)
+                                    for wk in week_dict)
             net              = round(total_hours_dec - total_target_dec, 2)
             per_hour         = monthly_salary / total_target_dec if total_target_dec > 0 else 0
             calc_salary      = round(per_hour * (total_hours_dec + net), 2)
