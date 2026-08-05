@@ -601,11 +601,14 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         net               = round(total_hours_dec - total_target_dec, 2)
 
         # Salary: per_hour = Monthly Salary / Total Target hours;
-        # Calculated Salary = per_hour * (Total Hours + Net Hours)
+        # Calculated Salary = per_hour * Total Hours Worked. This alone
+        # already prorates for excess/shortage relative to target — adding
+        # Net Hours on top would double-count the deviation and could go
+        # negative when shortage exceeds half of hours worked.
         monthly_salary = salary_map.get(normalize_id(emp_id))
         if monthly_salary and total_target_dec > 0:
             per_hour           = monthly_salary / total_target_dec
-            calculated_salary  = round(per_hour * (total_hours_dec + net), 2)
+            calculated_salary  = round(per_hour * total_hours_dec, 2)
         else:
             calculated_salary  = None
 
@@ -1155,7 +1158,7 @@ def main():
                                     for wk in week_dict)
             net              = round(total_hours_dec - total_target_dec, 2)
             per_hour         = monthly_salary / total_target_dec if total_target_dec > 0 else 0
-            calc_salary      = round(per_hour * (total_hours_dec + net), 2)
+            calc_salary      = round(per_hour * total_hours_dec, 2)
             salary_preview.append({
                 "Employee":          raw_records[uid]['name'].title(),
                 "Total Hours":       decimal_to_hhmm(total_hours_dec),
