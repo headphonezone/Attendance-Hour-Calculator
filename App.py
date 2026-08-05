@@ -197,6 +197,52 @@ def make_salary_template():
     buf.seek(0)
     return buf
 
+# ── Part-Time Master parsing ────────────────────────────────────────────
+# Reusable file (ID, Name columns) so part-time employees don't need to be
+# re-selected from a dropdown every month — re-upload the same file.
+def parse_id_name_file(uploaded_file):
+    id_set, name_map, skipped = set(), {}, []
+    fname = (uploaded_file.name or "").lower()
+    try:
+        if fname.endswith(".csv"):
+            import csv as _csv
+            content = uploaded_file.getvalue().decode("utf-8-sig")
+            reader  = _csv.reader(content.splitlines())
+            rows    = list(reader)
+        else:
+            wb   = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
+            ws   = wb[wb.sheetnames[0]]
+            rows = list(ws.iter_rows(values_only=True))
+
+        for row_num, row in enumerate(rows, 1):
+            if not row or all(c is None for c in row):
+                continue
+            row = list(row) + [None] * max(0, 2 - len(row))
+            emp_id_raw, emp_name = row[0], row[1]
+
+            if emp_id_raw is None:
+                skipped.append((row_num, "—", "missing ID"))
+                continue
+            emp_id = normalize_id(emp_id_raw)
+            if not emp_id or emp_id.lower() in ("id", "employee id"):
+                continue
+
+            id_set.add(emp_id)
+            name_map[emp_id] = str(emp_name).strip() if emp_name else ""
+    except Exception as e:
+        skipped.append(("?", "?", f"file read error: {e}"))
+    return id_set, name_map, skipped
+
+def make_parttime_template():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Part-Time Master"
+    ws.append(["ID", "Name"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
 def parse_logs_sheet(ws):
     all_rows   = list(ws.iter_rows(values_only=True))
     period_str = ""
@@ -865,10 +911,11 @@ def main():
     active_employees = [uid for uid in emp_order if raw_records[uid]['punches']]
 
     for key, default in [
-        ('holiday_dates', []),
-        ('wfh_records',   {}),
-        ('fixes',         {}),
-        ('salary_map',    {}),
+        ('holiday_dates',  []),
+        ('wfh_records',    {}),
+        ('fixes',          {}),
+        ('salary_map',     {}),
+        ('part_time_ids',  set()),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
@@ -886,9 +933,55 @@ def main():
         pt_daily_target = st.number_input(
             "Part-Time Daily Target (hrs)", min_value=0.5, value=4.0, step=0.5
         )
-        part_time_list = st.multiselect(
-            "Select Part-Time Employees", options=active_employees
+        st.caption(
+            "Upload a reusable Part-Time Master (columns: ID, Name) once — "
+            "re-upload the same file each month instead of re-selecting from a list."
         )
+
+        pt_tmpl_col, pt_upl_col = st.columns([1, 2])
+        pt_tmpl_col.download_button(
+            "📄 Template", make_parttime_template(),
+            "part_time_master_template.xlsx", key="pt_template_dl"
+        )
+        pt_file = pt_upl_col.file_uploader(
+            "Upload Part-Time Master", type=["xlsx", "csv"], key="pt_upload"
+        )
+        if pt_file is not None:
+            pt_parsed_ids, pt_parsed_names, pt_skipped = parse_id_name_file(pt_file)
+            if pt_parsed_ids:
+                st.session_state.part_time_ids.update(pt_parsed_ids)
+                st.success(f"✅ Loaded {len(pt_parsed_ids)} part-time employee ID(s).")
+                known_ids = {raw_records[u]['id'] for u in active_employees}
+                unmatched = [eid for eid in pt_parsed_ids if eid not in known_ids]
+                if unmatched:
+                    st.warning(
+                        "⚠️ These IDs from the part-time file don't match any employee "
+                        "in this month's attendance data: "
+                        + ", ".join(f"{eid} ({pt_parsed_names.get(eid, '?')})" for eid in unmatched)
+                    )
+            else:
+                st.warning("⚠️ No valid ID/Name rows found in the uploaded file.")
+
+            if pt_skipped:
+                with st.expander(f"⚠️ {len(pt_skipped)} row(s) in the file couldn't be read"):
+                    for row_num, eid, reason in pt_skipped:
+                        st.write(f"Row {row_num} (ID: {eid}): {reason}")
+
+        with st.expander("✏️ Manually set / override part-time employees"):
+            for uid in active_employees:
+                eid     = raw_records[uid]['id']
+                checked = st.checkbox(
+                    raw_records[uid]['name'].title(),
+                    value=(eid in st.session_state.part_time_ids),
+                    key=f"pt_{uid}"
+                )
+                if checked:
+                    st.session_state.part_time_ids.add(eid)
+                else:
+                    st.session_state.part_time_ids.discard(eid)
+
+        part_time_list = [uid for uid in active_employees
+                           if raw_records[uid]['id'] in st.session_state.part_time_ids]
 
         st.divider()
         st.subheader("🏖️ Office Holidays")
