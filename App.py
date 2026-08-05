@@ -98,14 +98,14 @@ def get_month_sundays(year, month):
     return [d for d in range(1, total + 1) if date(year, month, d).weekday() == 6]
 
 # ── Salary Master parsing ──────────────────────────────────────────────
-# Reusable file (ID, Monthly Salary columns, header row optional) so the
+# Reusable file (ID, Name, Salary columns, header row optional) so the
 # user only maintains one small sheet and re-uploads it every month
 # instead of retyping salaries for every employee each time.
 def parse_salary_file(uploaded_file):
-    salary_map = {}
-    name = (uploaded_file.name or "").lower()
+    salary_map, name_map = {}, {}
+    fname = (uploaded_file.name or "").lower()
     try:
-        if name.endswith(".csv"):
+        if fname.endswith(".csv"):
             import csv as _csv
             content = uploaded_file.getvalue().decode("utf-8-sig")
             reader  = _csv.reader(content.splitlines())
@@ -116,9 +116,9 @@ def parse_salary_file(uploaded_file):
             rows = list(ws.iter_rows(values_only=True))
 
         for row in rows:
-            if not row or len(row) < 2:
+            if not row or len(row) < 3:
                 continue
-            emp_id, salary = row[0], row[1]
+            emp_id, emp_name, salary = row[0], row[1], row[2]
             if emp_id is None or salary is None:
                 continue
             emp_id = str(emp_id).strip()
@@ -128,15 +128,16 @@ def parse_salary_file(uploaded_file):
                 continue
             if emp_id and emp_id.lower() not in ("id", "employee id") and salary > 0:
                 salary_map[emp_id] = salary
+                name_map[emp_id]   = str(emp_name).strip() if emp_name else ""
     except Exception:
         pass
-    return salary_map
+    return salary_map, name_map
 
 def make_salary_template():
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Salary Master"
-    ws.append(["ID", "Monthly Salary"])
+    ws.append(["ID", "Name", "Monthly Salary"])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -905,7 +906,7 @@ def main():
         st.divider()
         st.subheader("💰 Salary Settings")
         st.caption(
-            "Upload a reusable Salary Master (columns: ID, Monthly Salary) once — "
+            "Upload a reusable Salary Master (columns: ID, Name, Monthly Salary) once — "
             "just re-upload the same file each month instead of retyping salaries. "
             "Per-hour rate = Monthly Salary ÷ Total Target hours; "
             "Calculated Salary = per-hour × (Total Hours + Net Hours)."
@@ -920,12 +921,20 @@ def main():
             "Upload Salary Master", type=["xlsx", "csv"], key="salary_upload"
         )
         if salary_file is not None:
-            parsed = parse_salary_file(salary_file)
+            parsed, parsed_names = parse_salary_file(salary_file)
             if parsed:
                 st.session_state.salary_map.update(parsed)
                 st.success(f"✅ Loaded salary for {len(parsed)} employee(s).")
+                known_ids = {raw_records[u]['id'] for u in active_employees}
+                unmatched = [eid for eid in parsed if eid not in known_ids]
+                if unmatched:
+                    st.warning(
+                        "⚠️ These IDs from the salary file don't match any employee "
+                        "in this month's attendance data: "
+                        + ", ".join(f"{eid} ({parsed_names.get(eid, '?')})" for eid in unmatched)
+                    )
             else:
-                st.warning("⚠️ No valid ID/Salary rows found in the uploaded file.")
+                st.warning("⚠️ No valid ID/Name/Salary rows found in the uploaded file.")
 
         with st.expander("✏️ Manually set / override salaries"):
             for uid in active_employees:
