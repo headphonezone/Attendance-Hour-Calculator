@@ -610,7 +610,16 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         # Values here are day-fractions (hours/24) so cells can be formatted
         # as real elapsed time ([h]:mm = 60 min/hr) instead of base-10
         # decimal. Rounding to 4 dp keeps ~0.35-second precision.
-        f_hrs      = f"=ROUND(SUMIF({name_col},{crit},{hours_col}),4)"
+        #
+        # Total Hours is capped at each week's target (excess excluded) —
+        # actual hours worked minus the excess portion, so a week with
+        # overtime doesn't inflate this figure. Total Excess (col E) still
+        # shows the excess separately. Total Hours + Total Excess always
+        # recovers the true raw hours worked, since Excess is never
+        # negative — unlike Net Hours, which can be negative and would
+        # double-subtract an already-reflected shortage if added here.
+        f_hrs      = (f"=ROUND(SUMIF({name_col},{crit},{hours_col})"
+                       f"-MAX(0,SUMIF({name_col},{crit},{excess_col})),4)")
         f_target   = f"=ROUND(SUMIF({name_col},{crit},{target_col}),4)"
         f_excess   = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{excess_col})),4)"
         f_shortage = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{shortage_col})),4)"
@@ -1249,13 +1258,18 @@ def main():
             total_hours_dec  = sum(sum(d.values()) for d in week_dict.values())
             total_target_dec = sum(get_effective_week_target(wk, year, month, current_daily, leave_by_week)
                                     for wk in week_dict)
+            total_excess_dec = sum(max(0.0, sum(d.values())
+                                    - get_effective_week_target(wk, year, month, current_daily, leave_by_week))
+                                    for wk, d in week_dict.items())
+            capped_hours_dec = total_hours_dec - total_excess_dec
             net              = round(total_hours_dec - total_target_dec, 2)
             per_hour         = monthly_salary / total_target_dec if total_target_dec > 0 else 0
             calc_salary      = round(per_hour * total_hours_dec, 2)
             salary_preview.append({
                 "Employee":          raw_records[uid]['name'].title(),
-                "Total Hours":       decimal_to_hhmm(total_hours_dec),
+                "Total Hours":       decimal_to_hhmm(capped_hours_dec),
                 "Total Target":      decimal_to_hhmm(total_target_dec),
+                "Excess":            decimal_to_hhmm(total_excess_dec),
                 "Net Hours":         net,
                 "Monthly Salary":    monthly_salary,
                 "Per-Hour Rate":     round(per_hour, 2),
