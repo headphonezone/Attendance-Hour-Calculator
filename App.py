@@ -646,7 +646,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         leave_days        = get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records)
         holidays_on_leave = get_holidays_on_leave(uid, raw_records, year, month, holiday_dates, wfh_records)
 
-        wk_dict          = employees_dec[uid]
+        wk_dict           = employees_dec[uid]
         current_daily     = pt_daily_target if uid in part_time_list else daily_target
         leave_by_week     = get_leave_days_by_week(uid, raw_records, year, month,
                                                      holiday_dates, wfh_records)
@@ -655,14 +655,18 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
                                  for wk in wk_dict)
         net               = round(total_hours_dec - total_target_dec, 2)
 
-        # Salary: per_hour = Monthly Salary / Total Target hours;
-        # Calculated Salary = per_hour * Total Hours Worked. This alone
-        # already prorates for excess/shortage relative to target — adding
-        # Net Hours on top would double-count the deviation and could go
+        # Salary: per_hour = Monthly Salary / full standard monthly target
+        # (NOT the leave-adjusted target above — the pay rate is fixed by
+        # the standard month, not shrunk by an individual's leave; only
+        # Target Hours/Shortage/Status use the leave-adjusted figure).
+        # Calculated Salary = per_hour * Total Hours Worked, which already
+        # prorates for excess/shortage relative to target — adding Net
+        # Hours on top would double-count the deviation and could go
         # negative when shortage exceeds half of hours worked.
+        total_target_raw_dec = sum(get_week_target(wk, year, month, current_daily) for wk in wk_dict)
         monthly_salary = salary_map.get(normalize_id(emp_id))
-        if monthly_salary and total_target_dec > 0:
-            per_hour           = monthly_salary / total_target_dec
+        if monthly_salary and total_target_raw_dec > 0:
+            per_hour           = monthly_salary / total_target_raw_dec
             calculated_salary  = round(per_hour * total_hours_dec, 2)
         else:
             calculated_salary  = None
@@ -1263,7 +1267,10 @@ def main():
                                     for wk, d in week_dict.items())
             capped_hours_dec = total_hours_dec - total_excess_dec
             net              = round(total_hours_dec - total_target_dec, 2)
-            per_hour         = monthly_salary / total_target_dec if total_target_dec > 0 else 0
+            # Per-hour rate uses the full standard target, not the
+            # leave-adjusted one — see write_consolidated_sheet for why.
+            total_target_raw_dec = sum(get_week_target(wk, year, month, current_daily) for wk in week_dict)
+            per_hour         = monthly_salary / total_target_raw_dec if total_target_raw_dec > 0 else 0
             calc_salary      = round(per_hour * total_hours_dec, 2)
             salary_preview.append({
                 "Employee":          raw_records[uid]['name'].title(),
