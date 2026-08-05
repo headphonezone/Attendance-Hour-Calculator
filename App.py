@@ -113,6 +113,12 @@ def normalize_id(val):
                 s = str(int(f))
         except ValueError:
             pass
+    # Purely numeric IDs: strip leading zeros so "007" (kept as text in one
+    # sheet) matches "7" (typed as a plain number in the other) — Excel
+    # can't preserve leading zeros in a numeric cell, so the padded form
+    # only ever shows up on one side.
+    if s.isdigit():
+        s = str(int(s))
     return s.upper()
 
 # ── Salary Master parsing ──────────────────────────────────────────────
@@ -1087,7 +1093,8 @@ def main():
             })
         if salary_preview:
             st.dataframe(salary_preview, use_container_width=True)
-        missing = [raw_records[uid]['name'].title() for uid in active_employees
+        missing = [f"{raw_records[uid]['name'].title()} (ID: {raw_records[uid]['id']})"
+                   for uid in active_employees
                    if uid in employees_dec and not salary_map.get(raw_records[uid]['id'])]
         if missing:
             st.warning("⚠️ No salary set for: " + ", ".join(missing))
