@@ -97,6 +97,24 @@ def get_month_sundays(year, month):
     total = calendar.monthrange(year, month)[1]
     return [d for d in range(1, total + 1) if date(year, month, d).weekday() == 6]
 
+# ── ID normalization ────────────────────────────────────────────────────
+# Excel stores IDs as numbers unless the cell is formatted as text, so the
+# same employee ID can round-trip as "91", "91.0", " 91 " or "ABC01" vs
+# "abc01" depending on which sheet it came from. Salary matching is by ID,
+# so every ID must funnel through this before being stored or compared.
+def normalize_id(val):
+    if val is None:
+        return ""
+    s = str(val).strip()
+    if s.endswith(".0"):
+        try:
+            f = float(s)
+            if f == int(f):
+                s = str(int(f))
+        except ValueError:
+            pass
+    return s.upper()
+
 # ── Salary Master parsing ──────────────────────────────────────────────
 # Reusable file (ID, Name, Salary columns, header row optional) so the
 # user only maintains one small sheet and re-uploads it every month
@@ -121,7 +139,7 @@ def parse_salary_file(uploaded_file):
             emp_id, emp_name, salary = row[0], row[1], row[2]
             if emp_id is None or salary is None:
                 continue
-            emp_id = str(emp_id).strip()
+            emp_id = normalize_id(emp_id)
             try:
                 salary = float(salary)
             except (TypeError, ValueError):
@@ -163,7 +181,7 @@ def parse_logs_sheet(ws):
     while i < len(all_rows):
         row = all_rows[i]
         if row and row[0] == 'No :':
-            emp_no    = str(row[2]).strip()  if row[2]  else 'Unknown'
+            emp_no    = normalize_id(row[2]) if row[2] else 'Unknown'
             emp_name  = str(row[10]).strip() if row[10] else 'Unnamed'
             uid       = f"{emp_name.title()} (ID: {emp_no})"
             days_row  = all_rows[i - 1] if i > 0 else []
@@ -517,7 +535,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
 
         # Salary: per_hour = Monthly Salary / Total Target hours;
         # Calculated Salary = per_hour * (Total Hours + Net Hours)
-        monthly_salary = salary_map.get(str(emp_id).strip())
+        monthly_salary = salary_map.get(normalize_id(emp_id))
         if monthly_salary and total_target_dec > 0:
             per_hour           = monthly_salary / total_target_dec
             calculated_salary  = round(per_hour * (total_hours_dec + net), 2)
