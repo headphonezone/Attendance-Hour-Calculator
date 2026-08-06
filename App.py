@@ -431,8 +431,8 @@ def write_raw_data_sheet(wb, employees_dec, emp_order, raw_records,
     ws = wb.create_sheet(RAW_SHEET)
     ws.sheet_state = 'hidden'
 
-    for col, h in enumerate(["UID_KEY", "ID", "Name", "Week",
-                              "HoursWorked", "Target", "Excess", "Shortage"], 1):
+    for col, h in enumerate(["UID_KEY", "ID", "Name", "Week", "HoursWorked",
+                              "Target", "Excess", "Shortage", "RawTarget"], 1):
         ws.cell(row=1, column=col, value=h)
 
     row     = RAW_DATA_START_ROW
@@ -448,8 +448,9 @@ def write_raw_data_sheet(wb, employees_dec, emp_order, raw_records,
                                                 holiday_dates, wfh_records)
 
         for wk in sorted(week_dict.keys()):
-            wk_target  = get_effective_week_target(wk, year, month, current_daily, leave_by_week)
-            wk_hrs_dec = sum_week_hours(week_dict[wk])
+            wk_target     = get_effective_week_target(wk, year, month, current_daily, leave_by_week)
+            wk_target_raw = get_week_target(wk, year, month, current_daily)
+            wk_hrs_dec    = sum_week_hours(week_dict[wk])
 
             ws.cell(row=row, column=1, value=uid)
             ws.cell(row=row, column=2, value=raw_records[uid]['id'])
@@ -459,6 +460,9 @@ def write_raw_data_sheet(wb, employees_dec, emp_order, raw_records,
             ws.cell(row=row, column=6, value=to_excel_time(wk_target)).number_format  = TIME_FMT
             ws.cell(row=row, column=7, value=f"=MAX(0,E{row}-F{row})").number_format  = TIME_FMT
             ws.cell(row=row, column=8, value=f"=MAX(0,F{row}-E{row})").number_format  = TIME_FMT
+            # RawTarget: standard target unadjusted for leave — used only
+            # as the salary rate's denominator (see write_consolidated_sheet).
+            ws.cell(row=row, column=9, value=to_excel_time(wk_target_raw)).number_format = TIME_FMT
 
             row_map[uid][wk] = row
             row += 1
@@ -558,7 +562,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         "Net Hours",    # G — number only (positive=excess, negative=shortage)
         "Status",       # H — "Excess" / "Shortage" / "On Target"
         "Days Worked", "Leave Days", "Holidays on Leave", "Sundays", "Holidays",
-        "Monthly Salary", "Calculated Salary"
+        "Monthly Salary", "Std Monthly Target", "Per-Hour Rate", "Calculated Salary"
     ]
     num_cols = len(headers)
 
@@ -590,6 +594,8 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
     total_summary_rows = sum(len(d) for d in employees_dec.values())
     sum_end_row        = max(5, 5 + total_summary_rows - 1)
     ws_ref             = "'Weekly Summary'"
+    raw_end_row        = max(RAW_DATA_START_ROW, RAW_DATA_START_ROW + total_summary_rows - 1)
+    raw_ref            = f"'{RAW_SHEET}'"
 
     data_row = hdr_row + 1
 
@@ -655,21 +661,30 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
                                  for wk in wk_dict)
         net               = round(total_hours_dec - total_target_dec, 2)
 
-        # Salary: per_hour = Monthly Salary / full standard monthly target
-        # (NOT the leave-adjusted target above — the pay rate is fixed by
-        # the standard month, not shrunk by an individual's leave; only
-        # Target Hours/Shortage/Status use the leave-adjusted figure).
-        # Calculated Salary = per_hour * Total Hours Worked, which already
-        # prorates for excess/shortage relative to target — adding Net
-        # Hours on top would double-count the deviation and could go
-        # negative when shortage exceeds half of hours worked.
-        total_target_raw_dec = sum(get_week_target(wk, year, month, current_daily) for wk in wk_dict)
         monthly_salary = salary_map.get(normalize_id(emp_id))
-        if monthly_salary and total_target_raw_dec > 0:
-            per_hour           = monthly_salary / total_target_raw_dec
-            calculated_salary  = round(per_hour * total_hours_dec, 2)
+
+        if monthly_salary:
+            # Salary is fully formula-driven so it recalculates in Excel if
+            # hours are edited in Weekly Summary afterward:
+            #   Std Monthly Target (O) = SUMIF of the *unadjusted* per-week
+            #     target from the hidden _RawData sheet — NOT the
+            #     leave-adjusted Total Target (D) above, since the pay rate
+            #     is fixed by the standard month, not shrunk by leave.
+            #   Per-Hour Rate (P)      = Monthly Salary / Std Monthly Target
+            #   Calculated Salary (Q)  = Per-Hour Rate * (Total Hours + Total
+            #     Excess), i.e. the true raw hours worked (C+E always equals
+            #     raw hours since Excess is never negative — unlike Net
+            #     Hours, which can be negative and would double-subtract an
+            #     already-reflected shortage if used here instead).
+            raw_target_col = f"{raw_ref}!$I$2:$I${raw_end_row}"
+            raw_name_col   = f"{raw_ref}!$C$2:$C${raw_end_row}"
+            f_std_target = f"=ROUND(SUMIF({raw_name_col},{crit},{raw_target_col}),4)"
+            f_per_hour   = f"=IF(O{data_row}=0,0,N{data_row}/O{data_row})"
+            f_calc_salary = f"=ROUND(P{data_row}*(C{data_row}+E{data_row}),2)"
         else:
-            calculated_salary  = None
+            f_std_target = None
+            f_per_hour   = None
+            f_calc_salary = None
 
         vals = [
             emp_id,             # A — 1
@@ -685,21 +700,23 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             holidays_on_leave,  # K — 11
             num_sundays,        # L — 12
             num_holidays,       # M — 13
-            monthly_salary,     # N — 14
-            calculated_salary,  # O — 15
+            monthly_salary,     # N — 14  Monthly Salary (input value)
+            f_std_target,       # O — 15  Std Monthly Target (formula)
+            f_per_hour,         # P — 16  Per-Hour Rate (formula)
+            f_calc_salary,      # Q — 17  Calculated Salary (formula)
         ]
 
         for col, v in enumerate(vals, 1):
             c = ws.cell(row=data_row, column=col, value=v)
-            if col in (3, 4, 5, 6):
+            if col in (3, 4, 5, 6, 15):
                 c.number_format = TIME_FMT
-            if col in (14, 15):
+            if col in (14, 16, 17):
                 c.number_format = "#,##0.00"
             if col in (7, 8):
                 fill_c = C_EXCESS_BG if net > 0 else (C_SHORT_BG if net < 0 else C_ALT_ROW)
             elif col == 11 and isinstance(v, int) and v > 0:
                 fill_c = C_HOLIDAY_BG
-            elif col == 15 and calculated_salary is None:
+            elif col == 17 and monthly_salary is None:
                 fill_c = C_SHORT_BG
             else:
                 fill_c = C_ALT_ROW
@@ -717,7 +734,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         ws.column_dimensions[ltr].width = 15
     for ltr in ['I', 'J', 'L', 'M']:
         ws.column_dimensions[ltr].width = 13
-    for ltr in ['N', 'O']:
+    for ltr in ['N', 'O', 'P', 'Q']:
         ws.column_dimensions[ltr].width = 16
 
 def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
