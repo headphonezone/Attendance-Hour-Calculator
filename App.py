@@ -688,12 +688,18 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             # (8.30 FT / 8.00 PT by default) — NOT the attendance daily
             # target (daily_target/pt_daily_target), which is a separate
             # figure used only for Target Hours/Excess/Shortage tracking.
+            #
+            # C and E are stored as Excel day-fractions (hours/24, see
+            # TIME_FMT) so [h]:mm displays correctly — they must be
+            # multiplied by 24 here to get plain hours before mixing them
+            # with the plain-hours payroll_daily constant, or Extra Time
+            # comes out wildly wrong (e.g. ~-246 instead of a few hours).
             payroll_daily = pt_payroll_daily_hours if uid in part_time_list else ft_payroll_daily_hours
             f_sal_per_day  = f"=ROUND(N{data_row}/{days_in_month},4)"
             f_days_payroll = f"={days_in_month}-J{data_row}"
             f_gross        = f"=ROUND(O{data_row}*P{data_row},2)"
             f_sal_per_hour = f"=ROUND(O{data_row}/{payroll_daily},4)"
-            f_extra_time   = f"=ROUND((C{data_row}+E{data_row})-(P{data_row}*{payroll_daily}),4)"
+            f_extra_time   = f"=ROUND(((C{data_row}+E{data_row})*24)-(P{data_row}*{payroll_daily}),4)"
             f_extra_sal    = f"=ROUND(S{data_row}*R{data_row},2)"
             f_calc_salary  = f"=ROUND(Q{data_row}+T{data_row},2)"
         else:
