@@ -562,9 +562,11 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         "Net Hours",    # G — number only (positive=excess, negative=shortage)
         "Status",       # H — "Excess" / "Shortage" / "On Target"
         "Days Worked", "Leave Days", "Holidays on Leave", "Sundays", "Holidays",
-        "Monthly Salary", "Std Monthly Target", "Per-Hour Rate", "Calculated Salary"
+        "Monthly Salary", "Sal Per Day", "Days Worked (Payroll)", "Gross Salary",
+        "Sal Per Hour", "Extra Time", "Extra Sal", "Calculated Salary"
     ]
     num_cols = len(headers)
+    days_in_month = calendar.monthrange(year, month)[1]
 
     ws.merge_cells(f"A1:{get_column_letter(num_cols)}1")
     c = ws["A1"]
@@ -594,8 +596,6 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
     total_summary_rows = sum(len(d) for d in employees_dec.values())
     sum_end_row        = max(5, 5 + total_summary_rows - 1)
     ws_ref             = "'Weekly Summary'"
-    raw_end_row        = max(RAW_DATA_START_ROW, RAW_DATA_START_ROW + total_summary_rows - 1)
-    raw_ref            = f"'{RAW_SHEET}'"
 
     data_row = hdr_row + 1
 
@@ -664,27 +664,39 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         monthly_salary = salary_map.get(normalize_id(emp_id))
 
         if monthly_salary:
-            # Salary is fully formula-driven so it recalculates in Excel if
-            # hours are edited in Weekly Summary afterward:
-            #   Std Monthly Target (O) = SUMIF of the *unadjusted* per-week
-            #     target from the hidden _RawData sheet — NOT the
-            #     leave-adjusted Total Target (D) above, since the pay rate
-            #     is fixed by the standard month, not shrunk by leave.
-            #   Per-Hour Rate (P)      = Monthly Salary / Std Monthly Target
-            #   Calculated Salary (Q)  = Per-Hour Rate * (Total Hours + Total
-            #     Excess), i.e. the true raw hours worked (C+E always equals
-            #     raw hours since Excess is never negative — unlike Net
-            #     Hours, which can be negative and would double-subtract an
-            #     already-reflected shortage if used here instead).
-            raw_target_col = f"{raw_ref}!$I$2:$I${raw_end_row}"
-            raw_name_col   = f"{raw_ref}!$C$2:$C${raw_end_row}"
-            f_std_target = f"=ROUND(SUMIF({raw_name_col},{crit},{raw_target_col}),4)"
-            f_per_hour   = f"=IF(O{data_row}=0,0,N{data_row}/O{data_row})"
-            f_calc_salary = f"=ROUND(P{data_row}*(C{data_row}+E{data_row}),2)"
+            # Days-based payroll formula (matches the existing manual salary
+            # sheet), fully formula-driven so it recalculates in Excel if
+            # hours or leave are edited afterward:
+            #   Sal Per Day (O)            = Monthly Salary / Days in Month
+            #   Days Worked, Payroll (P)   = Days in Month - Leave Days (J);
+            #     i.e. every paid calendar day (including auto-credited
+            #     Sundays/holidays) counts as worked, only real leave
+            #     doesn't — unlike the "Days Worked" column (I), which
+            #     excludes Sundays/holidays for attendance-tracking purposes.
+            #   Gross Salary (Q)           = Sal Per Day * Days Worked, Payroll
+            #   Sal Per Hour (R)           = Sal Per Day / standard daily hours
+            #   Extra Time (S)             = actual raw hours worked (C+E,
+            #     since Excess is never negative, always equals the true
+            #     raw hours) minus (Days Worked, Payroll * standard daily
+            #     hours) — the hour-level surplus/shortfall beyond a plain
+            #     days count. Can be negative.
+            #   Extra Sal (T)              = Extra Time * Sal Per Hour
+            #   Calculated Salary (U)      = Gross Salary + Extra Sal
+            f_sal_per_day  = f"=ROUND(N{data_row}/{days_in_month},4)"
+            f_days_payroll = f"={days_in_month}-J{data_row}"
+            f_gross        = f"=ROUND(O{data_row}*P{data_row},2)"
+            f_sal_per_hour = f"=ROUND(O{data_row}/{current_daily},4)"
+            f_extra_time   = f"=ROUND((C{data_row}+E{data_row})-(P{data_row}*{current_daily}),4)"
+            f_extra_sal    = f"=ROUND(S{data_row}*R{data_row},2)"
+            f_calc_salary  = f"=ROUND(Q{data_row}+T{data_row},2)"
         else:
-            f_std_target = None
-            f_per_hour   = None
-            f_calc_salary = None
+            f_sal_per_day  = None
+            f_days_payroll = None
+            f_gross        = None
+            f_sal_per_hour = None
+            f_extra_time   = None
+            f_extra_sal    = None
+            f_calc_salary  = None
 
         vals = [
             emp_id,             # A — 1
@@ -701,22 +713,30 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             num_sundays,        # L — 12
             num_holidays,       # M — 13
             monthly_salary,     # N — 14  Monthly Salary (input value)
-            f_std_target,       # O — 15  Std Monthly Target (formula)
-            f_per_hour,         # P — 16  Per-Hour Rate (formula)
-            f_calc_salary,      # Q — 17  Calculated Salary (formula)
+            f_sal_per_day,      # O — 15  Sal Per Day (formula)
+            f_days_payroll,     # P — 16  Days Worked, Payroll (formula)
+            f_gross,            # Q — 17  Gross Salary (formula)
+            f_sal_per_hour,     # R — 18  Sal Per Hour (formula)
+            f_extra_time,       # S — 19  Extra Time (formula)
+            f_extra_sal,        # T — 20  Extra Sal (formula)
+            f_calc_salary,      # U — 21  Calculated Salary (formula)
         ]
 
         for col, v in enumerate(vals, 1):
             c = ws.cell(row=data_row, column=col, value=v)
-            if col in (3, 4, 5, 6, 15):
+            if col in (3, 4, 5, 6):
                 c.number_format = TIME_FMT
-            if col in (14, 16, 17):
+            if col in (14, 15, 17, 18, 20, 21):
                 c.number_format = "#,##0.00"
+            if col == 16:
+                c.number_format = "0"
+            if col == 19:
+                c.number_format = "0.00"
             if col in (7, 8):
                 fill_c = C_EXCESS_BG if net > 0 else (C_SHORT_BG if net < 0 else C_ALT_ROW)
             elif col == 11 and isinstance(v, int) and v > 0:
                 fill_c = C_HOLIDAY_BG
-            elif col == 17 and monthly_salary is None:
+            elif col == 21 and monthly_salary is None:
                 fill_c = C_SHORT_BG
             else:
                 fill_c = C_ALT_ROW
@@ -734,7 +754,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         ws.column_dimensions[ltr].width = 15
     for ltr in ['I', 'J', 'L', 'M']:
         ws.column_dimensions[ltr].width = 13
-    for ltr in ['N', 'O', 'P', 'Q']:
+    for ltr in ['N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U']:
         ws.column_dimensions[ltr].width = 16
 
 def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
@@ -1122,8 +1142,10 @@ def main():
         st.caption(
             "Upload a reusable Salary Master (columns: ID, Name, Monthly Salary) once — "
             "just re-upload the same file each month instead of retyping salaries. "
-            "Per-hour rate = Monthly Salary ÷ Total Target hours; "
-            "Calculated Salary = per-hour × Total Hours Worked."
+            "Days-based payroll formula: Sal Per Day = Salary ÷ Days in Month; "
+            "Gross Salary = Sal Per Day × (Days in Month − Leave Days); "
+            "Extra Sal = (Hours Worked − Days Worked×Daily Hours) × Sal Per Hour; "
+            "Calculated Salary = Gross Salary + Extra Sal."
         )
 
         tmpl_col, upl_col = st.columns([1, 2])
@@ -1264,6 +1286,7 @@ def main():
 
     if salary_map:
         st.header("💰 Salary Preview")
+        days_in_month = calendar.monthrange(year, month)[1]
         salary_preview = []
         for uid in active_employees:
             if uid not in employees_dec:
@@ -1276,6 +1299,7 @@ def main():
             week_dict        = employees_dec[uid]
             leave_by_week    = get_leave_days_by_week(uid, raw_records, year, month,
                                                         holiday_dates, wfh_records)
+            leave_days       = get_leave_days(uid, raw_records, year, month, holiday_dates, wfh_records)
             total_hours_dec  = sum(sum(d.values()) for d in week_dict.values())
             total_target_dec = sum(get_effective_week_target(wk, year, month, current_daily, leave_by_week)
                                     for wk in week_dict)
@@ -1284,20 +1308,29 @@ def main():
                                     for wk, d in week_dict.items())
             capped_hours_dec = total_hours_dec - total_excess_dec
             net              = round(total_hours_dec - total_target_dec, 2)
-            # Per-hour rate uses the full standard target, not the
-            # leave-adjusted one — see write_consolidated_sheet for why.
-            total_target_raw_dec = sum(get_week_target(wk, year, month, current_daily) for wk in week_dict)
-            per_hour         = monthly_salary / total_target_raw_dec if total_target_raw_dec > 0 else 0
-            calc_salary      = round(per_hour * total_hours_dec, 2)
+
+            # Days-based payroll formula (matches the manual salary sheet) —
+            # see write_consolidated_sheet for the full explanation.
+            sal_per_day    = monthly_salary / days_in_month
+            days_payroll   = days_in_month - leave_days
+            gross_salary   = round(sal_per_day * days_payroll, 2)
+            sal_per_hour   = sal_per_day / current_daily
+            extra_time     = round(total_hours_dec - (days_payroll * current_daily), 2)
+            extra_sal      = round(extra_time * sal_per_hour, 2)
+            calc_salary    = round(gross_salary + extra_sal, 2)
+
             salary_preview.append({
-                "Employee":          raw_records[uid]['name'].title(),
-                "Total Hours":       decimal_to_hhmm(capped_hours_dec),
-                "Total Target":      decimal_to_hhmm(total_target_dec),
-                "Excess":            decimal_to_hhmm(total_excess_dec),
-                "Net Hours":         net,
-                "Monthly Salary":    monthly_salary,
-                "Per-Hour Rate":     round(per_hour, 2),
-                "Calculated Salary": calc_salary,
+                "Employee":              raw_records[uid]['name'].title(),
+                "Total Hours":           decimal_to_hhmm(capped_hours_dec),
+                "Total Target":          decimal_to_hhmm(total_target_dec),
+                "Excess":                decimal_to_hhmm(total_excess_dec),
+                "Net Hours":             net,
+                "Monthly Salary":        monthly_salary,
+                "Days Worked (Payroll)": days_payroll,
+                "Gross Salary":          gross_salary,
+                "Extra Time (hrs)":      extra_time,
+                "Extra Sal":             extra_sal,
+                "Calculated Salary":     calc_salary,
             })
         if salary_preview:
             st.dataframe(salary_preview, use_container_width=True)
