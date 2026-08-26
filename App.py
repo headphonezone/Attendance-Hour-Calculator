@@ -605,7 +605,8 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         "Status",       # H — "Excess" / "Shortage" / "On Target"
         "Days Worked", "Leave Days", "Holidays on Leave", "Sundays", "Holidays",
         "Monthly Salary", "Sal Per Day", "Days Worked (Payroll)", "Gross Salary",
-        "Sal Per Hour", "Net Hours (hrs)", "Extra Sal", "Calculated Salary"
+        "Sal Per Hour", "Net Hours (hrs)", "Extra Sal", "Calculated Salary",
+        "Net Hours (raw)",   # V — hidden helper: plain number, for math only
     ]
     num_cols = len(headers)
     days_in_month = calendar.monthrange(year, month)[1]
@@ -672,28 +673,29 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         f_excess   = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{excess_col})),4)"
         f_shortage = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{shortage_col})),4)"
 
-        # S: Net Hours as a plain number (Total Excess - Total Shortage,
-        # converted from day-fraction to real hours via *24) — the single
-        # source of truth for Net Hours. G's displayed text and H's status
-        # both derive FROM this cell (not from a separate (E-F) calc of
-        # their own), so they can never show a different figure than what
-        # salary math actually uses.
-        f_net_hours_num = f"=ROUND((E{data_row}-F{data_row})*24,4)"
+        # V: Net Hours as a plain number (Total Excess - Total Shortage,
+        # converted from day-fraction to real hours via *24) — hidden, math-
+        # only helper. G, H, and S (Net Hours (hrs)) all derive FROM this
+        # single cell rather than each recomputing (E-F) themselves, so
+        # they can never disagree with each other or with salary math.
+        f_net_hours_raw = f"=ROUND((E{data_row}-F{data_row})*24,4)"
 
-        # G: Net Hours — Excel can't render a negative [h]:mm duration
-        # (always shows ####), so build the label as text instead: positive
-        # net formats normally, negative net gets a "-" prefix on the
-        # absolute difference. Divide S back by 24 since TEXT("[h]:mm")
-        # expects a day-fraction, not plain hours.
+        # G and S: Net Hours as text — Excel can't render a negative
+        # [h]:mm duration (always shows ####), so build a text label
+        # instead: positive net formats normally, negative net gets a "-"
+        # prefix on the absolute difference. Divide V back by 24 since
+        # TEXT("[h]:mm") expects a day-fraction, not plain hours. S is
+        # display-only (identical to G) — Extra Sal (T) uses V, not S,
+        # for arithmetic since S is text.
         f_net_text = (
-            f'=IF(S{data_row}>=0,TEXT(S{data_row}/24,"[h]:mm"),'
-            f'"-"&TEXT(-S{data_row}/24,"[h]:mm"))'
+            f'=IF(V{data_row}>=0,TEXT(V{data_row}/24,"[h]:mm"),'
+            f'"-"&TEXT(-V{data_row}/24,"[h]:mm"))'
         )
 
         # H: Status label — based on the same Net Hours figure
         f_status = (
-            f'=IF(S{data_row}>0,"Excess",'
-            f'IF(S{data_row}<0,"Shortage","On Target"))'
+            f'=IF(V{data_row}>0,"Excess",'
+            f'IF(V{data_row}<0,"Shortage","On Target"))'
         )
 
         days_worked       = get_days_worked(uid, raw_records, wfh_records, holiday_dates, year, month)
@@ -723,9 +725,10 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             #     excludes Sundays/holidays for attendance-tracking purposes.
             #   Gross Salary (Q)           = Sal Per Day * Days Worked, Payroll
             #   Sal Per Hour (R)           = Sal Per Day / standard daily hours
-            #   Extra Sal (T)              = Net Hours (S) * Sal Per Hour —
-            #     the exact same Net Hours figure shown in column G, not a
-            #     separately recomputed one (see S above).
+            #   Extra Sal (T)              = Net Hours (raw, V) * Sal Per
+            #     Hour — the same figure shown as text in G/S, just the
+            #     hidden numeric version, since S is text and can't be
+            #     used in arithmetic.
             #   Calculated Salary (U)      = Gross Salary + Extra Sal
             #
             # "Standard daily hours" here is the payroll-specific constant
@@ -737,7 +740,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             f_days_payroll = f"={days_in_month}-J{data_row}"
             f_gross        = f"=ROUND(O{data_row}*P{data_row},2)"
             f_sal_per_hour = f"=ROUND(O{data_row}/{payroll_daily},4)"
-            f_extra_sal    = f"=ROUND(S{data_row}*R{data_row},2)"
+            f_extra_sal    = f"=ROUND(V{data_row}*R{data_row},2)"
             f_calc_salary  = f"=ROUND(Q{data_row}+T{data_row},2)"
         else:
             f_sal_per_day   = None
@@ -766,9 +769,10 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             f_days_payroll,     # P — 16  Days Worked, Payroll (formula)
             f_gross,            # Q — 17  Gross Salary (formula)
             f_sal_per_hour,     # R — 18  Sal Per Hour (formula)
-            f_net_hours_num,    # S — 19  Net Hours, hrs (formula)
+            f_net_text,         # S — 19  Net Hours (hrs) — same text as G
             f_extra_sal,        # T — 20  Extra Sal (formula)
             f_calc_salary,      # U — 21  Calculated Salary (formula)
+            f_net_hours_raw,    # V — 22  Net Hours (raw), hidden math helper
         ]
 
         for col, v in enumerate(vals, 1):
@@ -779,7 +783,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
                 c.number_format = "#,##0.00"
             if col == 16:
                 c.number_format = "0"
-            if col == 19:
+            if col == 22:
                 c.number_format = "0.00"
             if col in (7, 8):
                 fill_c = C_EXCESS_BG if net > 0 else (C_SHORT_BG if net < 0 else C_ALT_ROW)
@@ -805,6 +809,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         ws.column_dimensions[ltr].width = 13
     for ltr in ['N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U']:
         ws.column_dimensions[ltr].width = 16
+    ws.column_dimensions['V'].hidden = True
 
 def write_individual_sheet(wb, uid, week_dict, period_str, year, month,
                            daily_target, is_part_time, pt_daily_target,
