@@ -672,22 +672,28 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         f_excess   = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{excess_col})),4)"
         f_shortage = f"=ROUND(MAX(0,SUMIF({name_col},{crit},{shortage_col})),4)"
 
+        # S: Net Hours as a plain number (Total Excess - Total Shortage,
+        # converted from day-fraction to real hours via *24) — the single
+        # source of truth for Net Hours. G's displayed text and H's status
+        # both derive FROM this cell (not from a separate (E-F) calc of
+        # their own), so they can never show a different figure than what
+        # salary math actually uses.
+        f_net_hours_num = f"=ROUND((E{data_row}-F{data_row})*24,4)"
+
         # G: Net Hours — Excel can't render a negative [h]:mm duration
         # (always shows ####), so build the label as text instead: positive
         # net formats normally, negative net gets a "-" prefix on the
-        # absolute difference.
-        e_col = get_column_letter(5)
-        f_col = get_column_letter(6)
-        net_diff  = f"({e_col}{data_row}-{f_col}{data_row})"
+        # absolute difference. Divide S back by 24 since TEXT("[h]:mm")
+        # expects a day-fraction, not plain hours.
         f_net_text = (
-            f'=IF({net_diff}>=0,TEXT({net_diff},"[h]:mm"),'
-            f'"-"&TEXT(-{net_diff},"[h]:mm"))'
+            f'=IF(S{data_row}>=0,TEXT(S{data_row}/24,"[h]:mm"),'
+            f'"-"&TEXT(-S{data_row}/24,"[h]:mm"))'
         )
 
-        # H: Status label — based on the same excess/shortage difference
+        # H: Status label — based on the same Net Hours figure
         f_status = (
-            f'=IF({net_diff}>0,"Excess",'
-            f'IF({net_diff}<0,"Shortage","On Target"))'
+            f'=IF(S{data_row}>0,"Excess",'
+            f'IF(S{data_row}<0,"Shortage","On Target"))'
         )
 
         days_worked       = get_days_worked(uid, raw_records, wfh_records, holiday_dates, year, month)
@@ -717,28 +723,20 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             #     excludes Sundays/holidays for attendance-tracking purposes.
             #   Gross Salary (Q)           = Sal Per Day * Days Worked, Payroll
             #   Sal Per Hour (R)           = Sal Per Day / standard daily hours
-            #   Net Hours, hrs (S)         = the same Net Hours already shown
-            #     as text in column G (Total Excess - Total Shortage),
-            #     recomputed here as a plain number so it can be used in
-            #     arithmetic — positive for excess, negative for shortage.
-            #   Extra Sal (T)              = Net Hours (S) * Sal Per Hour
+            #   Extra Sal (T)              = Net Hours (S) * Sal Per Hour —
+            #     the exact same Net Hours figure shown in column G, not a
+            #     separately recomputed one (see S above).
             #   Calculated Salary (U)      = Gross Salary + Extra Sal
             #
             # "Standard daily hours" here is the payroll-specific constant
             # (8.30 FT / 8.00 PT by default) — NOT the attendance daily
             # target (daily_target/pt_daily_target), which is a separate
             # figure used only for Target Hours/Excess/Shortage tracking.
-            #
-            # E and F are stored as Excel day-fractions (hours/24, see
-            # TIME_FMT) so [h]:mm displays correctly — they must be
-            # multiplied by 24 here to get plain hours, or Net Hours comes
-            # out ~24x too small.
             payroll_daily = pt_payroll_daily_hours if uid in part_time_list else ft_payroll_daily_hours
             f_sal_per_day  = f"=ROUND(N{data_row}/{days_in_month},4)"
             f_days_payroll = f"={days_in_month}-J{data_row}"
             f_gross        = f"=ROUND(O{data_row}*P{data_row},2)"
             f_sal_per_hour = f"=ROUND(O{data_row}/{payroll_daily},4)"
-            f_net_hours_num = f"=ROUND((E{data_row}-F{data_row})*24,4)"
             f_extra_sal    = f"=ROUND(S{data_row}*R{data_row},2)"
             f_calc_salary  = f"=ROUND(Q{data_row}+T{data_row},2)"
         else:
@@ -746,7 +744,6 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             f_days_payroll  = None
             f_gross         = None
             f_sal_per_hour  = None
-            f_net_hours_num = None
             f_extra_sal     = None
             f_calc_salary   = None
 
