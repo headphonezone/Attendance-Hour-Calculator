@@ -564,7 +564,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
         "Status",       # H — "Excess" / "Shortage" / "On Target"
         "Days Worked", "Leave Days", "Holidays on Leave", "Sundays", "Holidays",
         "Monthly Salary", "Sal Per Day", "Days Worked (Payroll)", "Gross Salary",
-        "Sal Per Hour", "Extra Time", "Extra Sal", "Calculated Salary"
+        "Sal Per Hour", "Net Hours (hrs)", "Extra Sal", "Calculated Salary"
     ]
     num_cols = len(headers)
     days_in_month = calendar.monthrange(year, month)[1]
@@ -676,12 +676,11 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             #     excludes Sundays/holidays for attendance-tracking purposes.
             #   Gross Salary (Q)           = Sal Per Day * Days Worked, Payroll
             #   Sal Per Hour (R)           = Sal Per Day / standard daily hours
-            #   Extra Time (S)             = actual raw hours worked (C+E,
-            #     since Excess is never negative, always equals the true
-            #     raw hours) minus (Days Worked, Payroll * standard daily
-            #     hours) — the hour-level surplus/shortfall beyond a plain
-            #     days count. Can be negative.
-            #   Extra Sal (T)              = Extra Time * Sal Per Hour
+            #   Net Hours, hrs (S)         = the same Net Hours already shown
+            #     as text in column G (Total Excess - Total Shortage),
+            #     recomputed here as a plain number so it can be used in
+            #     arithmetic — positive for excess, negative for shortage.
+            #   Extra Sal (T)              = Net Hours (S) * Sal Per Hour
             #   Calculated Salary (U)      = Gross Salary + Extra Sal
             #
             # "Standard daily hours" here is the payroll-specific constant
@@ -689,27 +688,26 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             # target (daily_target/pt_daily_target), which is a separate
             # figure used only for Target Hours/Excess/Shortage tracking.
             #
-            # C and E are stored as Excel day-fractions (hours/24, see
+            # E and F are stored as Excel day-fractions (hours/24, see
             # TIME_FMT) so [h]:mm displays correctly — they must be
-            # multiplied by 24 here to get plain hours before mixing them
-            # with the plain-hours payroll_daily constant, or Extra Time
-            # comes out wildly wrong (e.g. ~-246 instead of a few hours).
+            # multiplied by 24 here to get plain hours, or Net Hours comes
+            # out ~24x too small.
             payroll_daily = pt_payroll_daily_hours if uid in part_time_list else ft_payroll_daily_hours
             f_sal_per_day  = f"=ROUND(N{data_row}/{days_in_month},4)"
             f_days_payroll = f"={days_in_month}-J{data_row}"
             f_gross        = f"=ROUND(O{data_row}*P{data_row},2)"
             f_sal_per_hour = f"=ROUND(O{data_row}/{payroll_daily},4)"
-            f_extra_time   = f"=ROUND(((C{data_row}+E{data_row})*24)-(P{data_row}*{payroll_daily}),4)"
+            f_net_hours_num = f"=ROUND((E{data_row}-F{data_row})*24,4)"
             f_extra_sal    = f"=ROUND(S{data_row}*R{data_row},2)"
             f_calc_salary  = f"=ROUND(Q{data_row}+T{data_row},2)"
         else:
-            f_sal_per_day  = None
-            f_days_payroll = None
-            f_gross        = None
-            f_sal_per_hour = None
-            f_extra_time   = None
-            f_extra_sal    = None
-            f_calc_salary  = None
+            f_sal_per_day   = None
+            f_days_payroll  = None
+            f_gross         = None
+            f_sal_per_hour  = None
+            f_net_hours_num = None
+            f_extra_sal     = None
+            f_calc_salary   = None
 
         vals = [
             emp_id,             # A — 1
@@ -730,7 +728,7 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             f_days_payroll,     # P — 16  Days Worked, Payroll (formula)
             f_gross,            # Q — 17  Gross Salary (formula)
             f_sal_per_hour,     # R — 18  Sal Per Hour (formula)
-            f_extra_time,       # S — 19  Extra Time (formula)
+            f_net_hours_num,    # S — 19  Net Hours, hrs (formula)
             f_extra_sal,        # T — 20  Extra Sal (formula)
             f_calc_salary,      # U — 21  Calculated Salary (formula)
         ]
@@ -1159,7 +1157,7 @@ def main():
             "just re-upload the same file each month instead of retyping salaries. "
             "Days-based payroll formula: Sal Per Day = Salary ÷ Days in Month; "
             "Gross Salary = Sal Per Day × (Days in Month − Leave Days); "
-            "Extra Sal = (Hours Worked − Days Worked×Daily Hours) × Sal Per Hour; "
+            "Extra Sal = Net Hours (Excess − Shortage) × Sal Per Hour; "
             "Calculated Salary = Gross Salary + Extra Sal."
         )
 
@@ -1340,13 +1338,15 @@ def main():
             # see write_consolidated_sheet for the full explanation. Uses the
             # payroll-specific standard daily hours (FT/PT), not the
             # attendance daily target used for Target Hours/Excess/Shortage.
+            # The hour-level pay adjustment uses Net Hours (Excess - Shortage,
+            # same figure as the Net Hours column), not a separate days-based
+            # "extra time" comparison.
             payroll_daily  = pt_payroll_daily_hours if uid in part_time_list else ft_payroll_daily_hours
             sal_per_day    = monthly_salary / days_in_month
             days_payroll   = days_in_month - leave_days
             gross_salary   = round(sal_per_day * days_payroll, 2)
             sal_per_hour   = sal_per_day / payroll_daily
-            extra_time     = round(total_hours_dec - (days_payroll * payroll_daily), 2)
-            extra_sal      = round(extra_time * sal_per_hour, 2)
+            extra_sal      = round(net * sal_per_hour, 2)
             calc_salary    = round(gross_salary + extra_sal, 2)
 
             salary_preview.append({
@@ -1358,7 +1358,6 @@ def main():
                 "Monthly Salary":        monthly_salary,
                 "Days Worked (Payroll)": days_payroll,
                 "Gross Salary":          gross_salary,
-                "Extra Time (hrs)":      extra_time,
                 "Extra Sal":             extra_sal,
                 "Calculated Salary":     calc_salary,
             })
