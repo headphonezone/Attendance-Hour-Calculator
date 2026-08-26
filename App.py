@@ -552,7 +552,8 @@ def write_summary_sheet(wb, employees_dec, emp_order, raw_records,
 # ── CHANGE 3: Net split into Net Hours (number) + Status (label) ──────────────
 def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_str,
                               year, month, daily_target, part_time_list, pt_daily_target,
-                              holiday_dates, wfh_records, row_map, salary_map=None):
+                              holiday_dates, wfh_records, row_map, salary_map=None,
+                              ft_payroll_daily_hours=8.3, pt_payroll_daily_hours=8.0):
     ws = wb.create_sheet("Consolidated Report")
     salary_map = salary_map or {}
 
@@ -682,11 +683,17 @@ def write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_s
             #     days count. Can be negative.
             #   Extra Sal (T)              = Extra Time * Sal Per Hour
             #   Calculated Salary (U)      = Gross Salary + Extra Sal
+            #
+            # "Standard daily hours" here is the payroll-specific constant
+            # (8.30 FT / 8.00 PT by default) — NOT the attendance daily
+            # target (daily_target/pt_daily_target), which is a separate
+            # figure used only for Target Hours/Excess/Shortage tracking.
+            payroll_daily = pt_payroll_daily_hours if uid in part_time_list else ft_payroll_daily_hours
             f_sal_per_day  = f"=ROUND(N{data_row}/{days_in_month},4)"
             f_days_payroll = f"={days_in_month}-J{data_row}"
             f_gross        = f"=ROUND(O{data_row}*P{data_row},2)"
-            f_sal_per_hour = f"=ROUND(O{data_row}/{current_daily},4)"
-            f_extra_time   = f"=ROUND((C{data_row}+E{data_row})-(P{data_row}*{current_daily}),4)"
+            f_sal_per_hour = f"=ROUND(O{data_row}/{payroll_daily},4)"
+            f_extra_time   = f"=ROUND((C{data_row}+E{data_row})-(P{data_row}*{payroll_daily}),4)"
             f_extra_sal    = f"=ROUND(S{data_row}*R{data_row},2)"
             f_calc_salary  = f"=ROUND(Q{data_row}+T{data_row},2)"
         else:
@@ -899,7 +906,8 @@ def write_wfh_sheet(wb, emp_order, raw_records, wfh_records, year, month, period
 
 def generate_report(employees_dec, emp_order, raw_records, period_str,
                     year, month, daily_target, part_time_list, pt_daily_target,
-                    holiday_dates, wfh_records, salary_map=None):
+                    holiday_dates, wfh_records, salary_map=None,
+                    ft_payroll_daily_hours=8.3, pt_payroll_daily_hours=8.0):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
@@ -914,7 +922,8 @@ def generate_report(employees_dec, emp_order, raw_records, period_str,
 
     write_consolidated_sheet(wb, employees_dec, emp_order, raw_records, period_str,
                               year, month, daily_target, part_time_list, pt_daily_target,
-                              holiday_dates, wfh_records, row_map, salary_map)
+                              holiday_dates, wfh_records, row_map, salary_map,
+                              ft_payroll_daily_hours, pt_payroll_daily_hours)
 
     write_wfh_sheet(wb, emp_order, raw_records, wfh_records, year, month, period_str)
 
@@ -1148,6 +1157,18 @@ def main():
             "Calculated Salary = Gross Salary + Extra Sal."
         )
 
+        sc1, sc2 = st.columns(2)
+        ft_payroll_daily_hours = sc1.number_input(
+            "FT Standard Daily Hours (salary)", min_value=0.1, value=8.3, step=0.05,
+            help="Used only for the payroll Sal Per Hour / Extra Time calculation — "
+                 "separate from the Full-Time Weekly Target above, which drives "
+                 "Target Hours/Excess/Shortage."
+        )
+        pt_payroll_daily_hours = sc2.number_input(
+            "PT Standard Daily Hours (salary)", min_value=0.1, value=8.0, step=0.05,
+            help="Same as above, for part-time employees."
+        )
+
         tmpl_col, upl_col = st.columns([1, 2])
         tmpl_col.download_button(
             "📄 Template", make_salary_template(),
@@ -1310,12 +1331,15 @@ def main():
             net              = round(total_hours_dec - total_target_dec, 2)
 
             # Days-based payroll formula (matches the manual salary sheet) —
-            # see write_consolidated_sheet for the full explanation.
+            # see write_consolidated_sheet for the full explanation. Uses the
+            # payroll-specific standard daily hours (FT/PT), not the
+            # attendance daily target used for Target Hours/Excess/Shortage.
+            payroll_daily  = pt_payroll_daily_hours if uid in part_time_list else ft_payroll_daily_hours
             sal_per_day    = monthly_salary / days_in_month
             days_payroll   = days_in_month - leave_days
             gross_salary   = round(sal_per_day * days_payroll, 2)
-            sal_per_hour   = sal_per_day / current_daily
-            extra_time     = round(total_hours_dec - (days_payroll * current_daily), 2)
+            sal_per_hour   = sal_per_day / payroll_daily
+            extra_time     = round(total_hours_dec - (days_payroll * payroll_daily), 2)
             extra_sal      = round(extra_time * sal_per_hour, 2)
             calc_salary    = round(gross_salary + extra_sal, 2)
 
@@ -1345,7 +1369,8 @@ def main():
         buf = generate_report(
             employees_dec, active_employees, raw_records, period_str,
             year, month, daily_target, part_time_list, pt_daily_target,
-            holiday_dates, wfh_records, salary_map
+            holiday_dates, wfh_records, salary_map,
+            ft_payroll_daily_hours, pt_payroll_daily_hours
         )
         st.download_button(
             "⬇️ Download attendance_report.xlsx",
