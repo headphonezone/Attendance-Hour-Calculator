@@ -76,6 +76,37 @@ def compute_hours_from_pair(t_in_str, t_out_str):
     except ValueError:
         return 0.0, "0.00"
 
+# Part-timers work one of two fixed half-day shifts: a morning shift
+# (09:30-13:30) or an evening shift (14:00-18:00). Full-timers work a
+# single 09:30-18:00 shift. When only one punch is recorded for a day,
+# infer the missing In/Out using whichever shift the punch falls in.
+PT_MORNING_SHIFT = ("09:30", "13:30")
+PT_EVENING_SHIFT = ("14:00", "18:00")
+FT_SHIFT         = ("09:30", "18:00")
+
+def infer_missing_punch(punch_str, is_part_time):
+    try:
+        t = datetime.strptime(punch_str, "%H:%M")
+    except ValueError:
+        return punch_str, punch_str
+
+    if is_part_time:
+        if t.hour < 14:
+            shift_start, shift_end = PT_MORNING_SHIFT
+        else:
+            shift_start, shift_end = PT_EVENING_SHIFT
+        midpoint = datetime.strptime(shift_start, "%H:%M") + (
+            datetime.strptime(shift_end, "%H:%M") - datetime.strptime(shift_start, "%H:%M")
+        ) / 2
+    else:
+        shift_start, shift_end = FT_SHIFT
+        midpoint = datetime.strptime("12:00", "%H:%M")
+
+    if t <= midpoint:
+        return punch_str, shift_end     # looks like an In punch — default the Out
+    else:
+        return shift_start, punch_str   # looks like an Out punch — default the In
+
 def get_week_number(day, year, month):
     wc, fw = 1, date(year, month, 1).weekday()
     for d in range(1, day + 1):
@@ -325,9 +356,8 @@ def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
                 # off as (13:25->13:25)=0hrs while dropping 18:15 entirely.
                 dec, _ = compute_hours_from_pair(p[0], p[-1])
             elif len(p) == 1:
-                h   = int(p[0].split(':')[0]) if ':' in p[0] else 0
-                dec, _ = (compute_hours_from_pair("09:30", p[0]) if h >= 12
-                          else compute_hours_from_pair(p[0], "18:00"))
+                t_in, t_out = infer_missing_punch(p[0], uid in part_time_list)
+                dec, _ = compute_hours_from_pair(t_in, t_out)
             else:
                 dec = 0.0
             if dec > 0:
@@ -1235,16 +1265,17 @@ def main():
     for uid in active_employees:
         p_dict    = raw_records[uid]['punches']
         emp_fixes = st.session_state.fixes.get(uid, {})
+        is_pt = uid in part_time_list
         for day, p in sorted(p_dict.items()):
             if len(p) == 1:
                 any_missing = True
                 c1, c2, c3, c4 = st.columns([2, 1, 3, 2])
                 c1.markdown(f"**{uid}**")
                 c2.write(f"Day {day}")
-                h = int(p[0].split(':')[0]) if ':' in p[0] else 0
-                if h >= 12:
+                default_in, default_out = infer_missing_punch(p[0], is_pt)
+                if default_out == p[0]:
                     c3.warning(f"Out: {p[0]} (In missing)")
-                    f_in = c4.text_input("Set In (HH:MM)", value="09:30", key=f"{uid}_{day}_in")
+                    f_in = c4.text_input("Set In (HH:MM)", value=default_in, key=f"{uid}_{day}_in")
                     try:
                         datetime.strptime(f_in, "%H:%M")
                         emp_fixes[day] = {'in': f_in, 'out': p[0]}
@@ -1252,7 +1283,7 @@ def main():
                         c4.error("Use HH:MM")
                 else:
                     c3.warning(f"In: {p[0]} (Out missing)")
-                    f_out = c4.text_input("Set Out (HH:MM)", value="18:00", key=f"{uid}_{day}_out")
+                    f_out = c4.text_input("Set Out (HH:MM)", value=default_out, key=f"{uid}_{day}_out")
                     try:
                         datetime.strptime(f_out, "%H:%M")
                         emp_fixes[day] = {'in': p[0], 'out': f_out}
