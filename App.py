@@ -313,7 +313,13 @@ def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
             if day in f_dict:
                 dec, _ = compute_hours_from_pair(f_dict[day]['in'], f_dict[day]['out'])
             elif len(p) >= 2:
-                dec = sum(compute_hours_from_pair(p[i], p[i+1])[0] for i in range(0, len(p)-1, 2))
+                # Take the earliest punch as In and the latest as Out.
+                # With exactly 2 punches this is just that pair; with 3+
+                # (duplicate scans, stray mid-day punches, etc.) it avoids
+                # misreading them as separate in/out sessions — e.g. a
+                # duplicate first punch [13:25, 13:25, 18:15] used to pair
+                # off as (13:25->13:25)=0hrs while dropping 18:15 entirely.
+                dec, _ = compute_hours_from_pair(p[0], p[-1])
             elif len(p) == 1:
                 h   = int(p[0].split(':')[0]) if ':' in p[0] else 0
                 dec, _ = (compute_hours_from_pair("09:30", p[0]) if h >= 12
