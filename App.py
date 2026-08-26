@@ -1053,6 +1053,16 @@ def main():
             pt_parsed_ids, pt_parsed_names, pt_skipped = parse_id_name_file(pt_file)
             if pt_parsed_ids:
                 st.session_state.part_time_ids.update(pt_parsed_ids)
+                # A checkbox's key="pt_<uid>" only honors value=... on the
+                # very first render for that key — every rerun after that,
+                # Streamlit ignores value= and reuses whatever's already in
+                # session_state[key], which the loop below then writes
+                # straight back into part_time_ids. Without this, a fresh
+                # upload's new IDs would get silently discarded again the
+                # moment the checkbox loop runs on this same rerun.
+                for u in active_employees:
+                    if raw_records[u]['id'] in pt_parsed_ids:
+                        st.session_state[f"pt_{u}"] = True
                 st.success(f"✅ Loaded {len(pt_parsed_ids)} part-time employee ID(s).")
                 known_ids = {raw_records[u]['id'] for u in active_employees}
                 unmatched = [eid for eid in pt_parsed_ids if eid not in known_ids]
@@ -1069,6 +1079,12 @@ def main():
                 with st.expander(f"⚠️ {len(pt_skipped)} row(s) in the file couldn't be read"):
                     for row_num, eid, reason in pt_skipped:
                         st.write(f"Row {row_num} (ID: {eid}): {reason}")
+
+        if st.button("🔄 Reset part-time list (clear all)"):
+            st.session_state.part_time_ids = set()
+            for u in active_employees:
+                st.session_state.pop(f"pt_{u}", None)
+            st.rerun()
 
         with st.expander("✏️ Manually set / override part-time employees"):
             for uid in active_employees:
