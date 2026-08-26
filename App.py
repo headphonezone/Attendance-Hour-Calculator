@@ -1086,6 +1086,14 @@ def main():
         part_time_list = [uid for uid in active_employees
                            if raw_records[uid]['id'] in st.session_state.part_time_ids]
 
+        if part_time_list:
+            st.caption(
+                "**Currently part-time (" + str(len(part_time_list)) + "):** "
+                + ", ".join(raw_records[u]['name'].title() for u in part_time_list)
+            )
+        else:
+            st.caption("No employees currently marked part-time.")
+
         st.divider()
         st.subheader("🏖️ Office Holidays")
         st.caption("Credited as paid holiday (incl. Sundays) at the FT/PT Standard Daily Hours set below under 💰 Salary Settings — not the attendance daily target above; not counted as a working day.")
@@ -1271,7 +1279,7 @@ def main():
                 any_missing = True
                 c1, c2, c3, c4 = st.columns([2, 1, 3, 2])
                 c1.markdown(f"**{uid}**")
-                c2.write(f"Day {day}")
+                c2.write(f"Day {day} ({'PT' if is_pt else 'FT'})")
                 default_in, default_out = infer_missing_punch(p[0], is_pt)
                 if default_out == p[0]:
                     c3.warning(f"Out: {p[0]} (In missing)")
