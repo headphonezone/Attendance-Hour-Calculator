@@ -291,7 +291,7 @@ def parse_logs_sheet(ws):
 # ── CHANGE 1 + 2: Skip relieved employees + inject paid holiday hrs ──────
 def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
                          holiday_dates, part_time_list=None, pt_daily_target=4.0,
-                         daily_target=8.5):
+                         daily_target=8.5, ft_holiday_hours=8.3, pt_holiday_hours=8.0):
     employees_dec    = {}
     holiday_day_nums = set(hd.day for hd in holiday_dates if hd.year == year and hd.month == month)
     month_sundays    = set(get_month_sundays(year, month))
@@ -300,7 +300,11 @@ def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
     for uid in emp_order:
         p_dict  = raw_records[uid]['punches']
         has_wfh = bool(wfh_records.get(uid, {}))
-        emp_daily_target = pt_daily_target if uid in part_time_list else daily_target
+        # Paid Sunday/holiday credit uses its own fixed standard hours
+        # (8.30 FT / 8.00 PT by default) — NOT the attendance daily target
+        # (daily_target/pt_daily_target), which is a separate, configurable
+        # figure used for Target Hours/Excess/Shortage.
+        emp_daily_target = pt_holiday_hours if uid in part_time_list else ft_holiday_hours
 
         # Skip relieved employees — no punches and no WFH for the entire month
         if not p_dict and not has_wfh:
@@ -1054,7 +1058,7 @@ def main():
 
         st.divider()
         st.subheader("🏖️ Office Holidays")
-        st.caption("Credited at each employee's daily target (8.30 hrs full-time / part-time rate) as paid holiday, incl. Sundays; not counted as a working day.")
+        st.caption("Credited as paid holiday (incl. Sundays) at the FT/PT Standard Daily Hours set below under 💰 Salary Settings — not the attendance daily target above; not counted as a working day.")
 
         new_holiday = st.date_input(
             "Pick holiday date",
@@ -1169,13 +1173,13 @@ def main():
 
         sc1, sc2 = st.columns(2)
         ft_payroll_daily_hours = sc1.number_input(
-            "FT Standard Daily Hours (salary)", min_value=0.1, value=8.3, step=0.05,
-            help="Used only for the payroll Sal Per Hour / Extra Time calculation — "
-                 "separate from the Full-Time Weekly Target above, which drives "
-                 "Target Hours/Excess/Shortage."
+            "FT Standard Daily Hours", min_value=0.1, value=8.3, step=0.05,
+            help="Used for the payroll Sal Per Hour calculation AND for "
+                 "paid Sunday/Holiday credit — separate from the Full-Time "
+                 "Weekly Target above, which drives Target Hours/Excess/Shortage."
         )
         pt_payroll_daily_hours = sc2.number_input(
-            "PT Standard Daily Hours (salary)", min_value=0.1, value=8.0, step=0.05,
+            "PT Standard Daily Hours", min_value=0.1, value=8.0, step=0.05,
             help="Same as above, for part-time employees."
         )
 
@@ -1262,7 +1266,8 @@ def main():
 
     employees_dec = build_employees_dec(
         active_employees, raw_records, st.session_state.fixes, wfh_records, year, month,
-        holiday_dates, part_time_list, pt_daily_target, daily_target
+        holiday_dates, part_time_list, pt_daily_target, daily_target,
+        ft_payroll_daily_hours, pt_payroll_daily_hours
     )
 
     st.header("📊 Attendance Summary Preview")
