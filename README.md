@@ -36,9 +36,9 @@ streamlit run app.py
 📋 How to Use
 Launch the App: Run the streamlit command above to open the interface in your browser.
 
-Upload Data: Upload an .xlsx file containing a sheet named Logs (formatted with employee IDs and punch strings).
+Upload Data: Upload the filled attendance .xlsx. It needs three sheets (found by content, not tab name): the filled attendance sheet (In Time / Out Time blocks per employee, daily target row, yellow = Sunday/holiday), the raw logs sheet (used only for employee IDs), and the salary sheet (Name of the Staff / Basic Salary). Review the "Match Employees" table — names are matched to IDs and salaries by closest name, and you can correct any blank or wrong match.
 
-Set Targets: Use the sidebar to adjust the Weekly Target Hours (default is 59.5 for a 7-day week) and the Part-Time daily target (default 4 hrs).
+Set Targets: Targets default from the sheet (8:30 full-time, 8:00 part-time; anyone below the full-time target is part-time). They can be adjusted in the sidebar.
 
 Fix Punches: If the app detects missing clock-ins or clock-outs, enter the estimated times in the provided text boxes.
 

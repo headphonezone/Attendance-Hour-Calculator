@@ -1,10 +1,12 @@
 import io
 import re
-from datetime import datetime, date
+import difflib
+from datetime import datetime, date, time as dtime
 from collections import defaultdict
 import calendar
 
 import streamlit as st
+import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -318,6 +320,190 @@ def parse_logs_sheet(ws):
                 raw_records[uid]['punches'].update(day_punches)
         i += 1
     return raw_records, emp_order, period_str, year, month
+
+# ── Filled attendance workbook (replaces the raw Logs sheet) ────────────
+# The filled workbook holds three sheets we care about, found by content
+# rather than by name since the tab names ("Sheet1", "Sheet4"...) are not
+# stable month to month:
+#   • attendance sheet — one In/Out block per employee (names only, no IDs),
+#     a daily-target row above each block, yellow = Sunday/holiday
+#   • logs sheet       — the raw device export; used only for IDs
+#   • salary sheet     — "Name of the Staff" / "Basic Salary" list
+NAME_MATCH_THRESHOLD = 0.85   # below this the match is left for the user to pick
+
+def _time_str(v):
+    if isinstance(v, (datetime, dtime)):
+        return v.strftime("%H:%M")
+    if isinstance(v, (int, float)) and 0 <= v < 1:
+        m = round(v * 1440)
+        return f"{m // 60:02d}:{m % 60:02d}"
+    if isinstance(v, str):
+        s = v.strip()
+        for fmt in ("%H:%M", "%H:%M:%S"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%H:%M")
+            except ValueError:
+                pass
+    return None
+
+def _time_hours(v):
+    s = _time_str(v)
+    if not s:
+        return None
+    h, m = s.split(":")
+    return int(h) + int(m) / 60
+
+def _is_yellow(cell):
+    f = cell.fill
+    return (f is not None and f.fill_type == "solid"
+            and f.fgColor.type == "rgb"
+            and str(f.fgColor.rgb).upper().endswith("FFFF00"))
+
+def _norm_name(s):
+    s = re.sub(r"\(.*?\)", " ", str(s).lower())
+    s = re.sub(r"\b(w\.?h|sweeper)\b", " ", s)
+    return re.sub(r"[^a-z]", "", s)
+
+def _name_score(a, b):
+    a, b = _norm_name(a), _norm_name(b)
+    if not a or not b:
+        return 0.0
+    r = difflib.SequenceMatcher(None, a, b).ratio()
+    # Device names are truncated ("gayathrim", "venkataleksh"), so a clean
+    # prefix match is as good as an exact one.
+    if min(len(a), len(b)) >= 4 and (a.startswith(b) or b.startswith(a)):
+        r = max(r, 0.9)
+    return r
+
+def match_names(sources, candidates, threshold=NAME_MATCH_THRESHOLD):
+    """One-to-one fuzzy match. Returns, per source, the index of its
+    candidate or None. Best scores are claimed first so a weak match can
+    never steal a candidate from a strong one."""
+    pairs = sorted(
+        ((_name_score(s, c), i, j) for i, s in enumerate(sources)
+                                    for j, c in enumerate(candidates)),
+        reverse=True,
+    )
+    result, used = [None] * len(sources), set()
+    for score, i, j in pairs:
+        if score < threshold:
+            break
+        if result[i] is None and j not in used:
+            result[i] = j
+            used.add(j)
+    return result
+
+def parse_attendance_sheet(ws):
+    """Returns (blocks, year, month, holiday_days). Each block is
+    {'name', 'target', 'punches': {day: [in, out]}} where punches use the
+    same "HH:MM" strings the old Logs parser produced."""
+    rows = list(ws.iter_rows())
+    blocks, holiday_days = [], set()
+    year = month = None
+
+    for idx, row in enumerate(rows):
+        label = row[1].value if len(row) > 1 else None
+        if not (isinstance(label, str) and label.strip().lower() == "in time"):
+            continue
+        if idx < 3 or idx + 1 >= len(rows):
+            continue
+        in_row, out_row = row, rows[idx + 1]
+        date_row, day_row, target_row = rows[idx - 1], rows[idx - 2], rows[idx - 3]
+
+        if year is None and isinstance(date_row[1].value, datetime):
+            year, month = date_row[1].value.year, date_row[1].value.month
+
+        name_cell = in_row[0].value or out_row[0].value
+        name      = " ".join(str(name_cell).split()) if name_cell else ""
+
+        punches, targets, yellow = {}, [], []
+        for col in range(2, len(in_row)):
+            day = day_row[col].value if col < len(day_row) else None
+            if not isinstance(day, int):
+                continue
+            t = _time_hours(target_row[col].value) if col < len(target_row) else None
+            if t:
+                targets.append(t)
+            if _is_yellow(in_row[col]):
+                yellow.append(day)
+            t_in  = _time_str(in_row[col].value)
+            t_out = _time_str(out_row[col].value) if col < len(out_row) else None
+            day_p = [t for t in (t_in, t_out) if t]
+            if day_p:
+                punches[day] = day_p
+
+        if year is not None:
+            for d in yellow:
+                try:
+                    if date(year, month, d).weekday() != 6:   # Sundays are auto-credited
+                        holiday_days.add(d)
+                except ValueError:
+                    pass
+
+        target = max(set(targets), key=targets.count) if targets else None
+        blocks.append({'name': name, 'target': target, 'punches': punches})
+
+    return blocks, year, month, holiday_days
+
+def parse_salary_sheet(ws):
+    """[(name, monthly_salary)] from a "Name of the Staff" / "Basic Salary"
+    sheet. Reads cached values, so formula cells need the workbook to have
+    been saved by Excel."""
+    rows = list(ws.iter_rows(values_only=True))
+    name_col = sal_col = hdr = None
+    for i, row in enumerate(rows[:15]):
+        low = [str(c).strip().lower() if c is not None else "" for c in row]
+        if "name of the staff" in low:
+            name_col = low.index("name of the staff")
+            sal_col  = low.index("basic salary") if "basic salary" in low else None
+            hdr = i
+            break
+    if hdr is None or sal_col is None:
+        return []
+    out = []
+    for row in rows[hdr + 1:]:
+        if len(row) <= max(name_col, sal_col) or not row[name_col]:
+            continue
+        sal = _parse_salary_number(row[sal_col])
+        if sal and sal > 0:
+            out.append((" ".join(str(row[name_col]).split()), sal))
+    return out
+
+def _find_sheets(wb):
+    att = logs = sal = None
+    for ws in wb.worksheets:
+        head = list(ws.iter_rows(min_row=1, max_row=60, max_col=3, values_only=True))
+        if att is None and any(isinstance(r[1], str) and r[1].strip().lower() == "in time"
+                               for r in head if len(r) > 1):
+            att = ws
+        elif logs is None and any(r and r[0] == 'No :' for r in head):
+            logs = ws
+        elif sal is None and any("name of the staff" in
+                                 [str(c).strip().lower() for c in r if c is not None]
+                                 for r in ws.iter_rows(min_row=1, max_row=15, max_col=4, values_only=True)):
+            sal = ws
+    return att, logs, sal
+
+@st.cache_data(show_spinner="Reading workbook…")
+def load_filled_workbook(file_bytes):
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    att, logs, sal = _find_sheets(wb)
+    if att is None:
+        return None
+    blocks, year, month, holiday_days = parse_attendance_sheet(att)
+    log_ids, period_str = [], ""
+    if logs is not None:
+        log_records, log_order, period_str, log_year, log_month = parse_logs_sheet(logs)
+        log_ids = [(log_records[u]['id'], log_records[u]['name']) for u in log_order]
+        if year is None:
+            year, month = log_year, log_month
+    salaries = parse_salary_sheet(sal) if sal is not None else []
+    return {
+        'blocks': blocks, 'year': year, 'month': month,
+        'holiday_days': sorted(holiday_days), 'log_ids': log_ids,
+        'period_str': period_str, 'salaries': salaries,
+        'has_logs': logs is not None, 'has_salary': sal is not None,
+    }
 
 # ── CHANGE 1 + 2: Skip relieved employees + inject paid holiday hrs ──────
 def build_employees_dec(emp_order, raw_records, fixes, wfh_records, year, month,
@@ -1003,115 +1189,138 @@ def main():
     st.set_page_config(page_title="Attendance Processor", layout="wide")
     st.title("🕐 Attendance Processor")
 
-    uploaded = st.file_uploader("📂 Upload Attendance XLSX", type=["xlsx"])
+    uploaded = st.file_uploader("📂 Upload Filled Attendance XLSX (attendance + logs + salary sheets)", type=["xlsx"])
     if not uploaded:
         return
 
-    wb_in     = openpyxl.load_workbook(uploaded, read_only=True)
-    log_sheet = next((wb_in[n] for n in wb_in.sheetnames if n.lower() == 'logs'), None)
-    if not log_sheet:
-        st.error("No 'Logs' sheet found.")
+    data = load_filled_workbook(uploaded.getvalue())
+    if data is None:
+        st.error("No attendance sheet found (expected a sheet with 'In Time' / 'Out Time' rows).")
         return
+    if not data['has_logs']:
+        st.warning("⚠️ No logs sheet ('No :' / 'Name :' layout) found — IDs can't be matched.")
+    if not data['has_salary']:
+        st.warning("⚠️ No salary sheet ('Name of the Staff' / 'Basic Salary') found — salary preview disabled.")
 
-    raw_records, emp_order, period_str, year, month = parse_logs_sheet(log_sheet)
-    active_employees = [uid for uid in emp_order if raw_records[uid]['punches']]
+    year, month = data['year'], data['month']
+    if year is None:
+        st.error("Couldn't read the month from the attendance sheet.")
+        return
+    last_day   = calendar.monthrange(year, month)[1]
+    period_str = data['period_str'] or f"{year}/{month:02d}/01 ~ {month:02d}/{last_day:02d}"
+
+    blocks = [b for b in data['blocks'] if b['name'] and b['punches']]
+
+    # Part-time = daily target below the full-time one in the sheet (8:30 FT / 8:00 PT).
+    targets      = sorted({round(b['target'], 4) for b in blocks if b['target']})
+    ft_sheet_tgt = targets[-1] if targets else 8.5
+    pt_sheet_tgt = targets[0] if len(targets) > 1 else 8.0
+    is_pt_block  = lambda b: bool(b['target']) and b['target'] < ft_sheet_tgt - 1e-6
+
+    # Name → ID (logs sheet) and name → salary row (salary sheet), best guesses
+    # first; anything under the threshold is left blank for the user to pick.
+    NONE_OPT   = "— none —"
+    id_opts    = [f"{i} – {n}" for i, n in data['log_ids']]
+    sal_opts   = [f"{n} – {int(s):,}" for n, s in data['salaries']]
+    id_guess   = match_names([b['name'] for b in blocks], [n for _, n in data['log_ids']])
+    sal_guess  = match_names([b['name'] for b in blocks], [n for n, _ in data['salaries']])
+
+    file_sig = f"{uploaded.name}:{uploaded.size}"
+    map_rows = [{
+        "Employee":     b['name'],
+        "Part-time":    is_pt_block(b),
+        "Logs ID":      id_opts[id_guess[k]] if id_guess[k] is not None else NONE_OPT,
+        "Salary sheet": sal_opts[sal_guess[k]] if sal_guess[k] is not None else NONE_OPT,
+        "Salary override": 0.0,
+    } for k, b in enumerate(blocks)]
+
+    st.header("🔗 Match Employees")
+    n_review = sum(1 for r in map_rows if NONE_OPT in (r["Logs ID"], r["Salary sheet"]))
+    st.caption(
+        "Names come from the attendance sheet. The ID is taken from the logs sheet and the "
+        "salary from the salary sheet by closest name. Check the rows below and fix any "
+        "wrong or blank match — salary uses the override if you enter one."
+    )
+    if n_review:
+        st.warning(f"⚠️ {n_review} employee(s) have a blank ID or salary match — review them below.")
+    edited = st.data_editor(
+        pd.DataFrame(map_rows),
+        key=f"map_editor_{file_sig}",
+        hide_index=True, use_container_width=True,
+        disabled=["Employee", "Part-time"],
+        column_config={
+            "Logs ID":      st.column_config.SelectboxColumn(options=[NONE_OPT] + id_opts, required=True),
+            "Salary sheet": st.column_config.SelectboxColumn(options=[NONE_OPT] + sal_opts, required=True),
+            "Salary override": st.column_config.NumberColumn(min_value=0.0, step=500.0),
+        },
+    )
+
+    raw_records, emp_order, part_time_list, salary_by_uid = {}, [], [], {}
+    for k, b in enumerate(blocks):
+        row    = edited.iloc[k]
+        id_pick, sal_pick = row["Logs ID"], row["Salary sheet"]
+        if id_pick in id_opts:
+            emp_no = normalize_id(data['log_ids'][id_opts.index(id_pick)][0])
+        else:
+            emp_no = f"NA{k + 1}"          # unique placeholder so records never collide
+        uid = f"{b['name'].title()} (ID: {emp_no})"
+        if uid in raw_records:
+            uid = f"{uid} #{k + 1}"
+        raw_records[uid] = {'name': b['name'], 'id': emp_no, 'punches': b['punches']}
+        emp_order.append(uid)
+        if is_pt_block(b):
+            part_time_list.append(uid)
+        override = float(row["Salary override"] or 0)
+        if override > 0:
+            salary_by_uid[uid] = override
+        elif sal_pick in sal_opts:
+            salary_by_uid[uid] = data['salaries'][sal_opts.index(sal_pick)][1]
+    active_employees = emp_order
 
     for key, default in [
         ('holiday_dates',  []),
         ('wfh_records',    {}),
         ('fixes',          {}),
-        ('salary_map',     {}),
-        ('part_time_ids',  set()),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
+
+    # New workbook → start from what the sheet says (yellow weekday = office
+    # holiday) instead of carrying over last month's manual entries.
+    if st.session_state.get('loaded_sig') != file_sig:
+        st.session_state.loaded_sig    = file_sig
+        st.session_state.holiday_dates = [date(year, month, d) for d in data['holiday_days']]
+        st.session_state.wfh_records   = {}
+        st.session_state.fixes         = {}
 
     with st.sidebar:
         st.header("⚙️ Settings")
         target_weekly = st.number_input(
             "Full-Time Weekly Target (hrs, 7-day week)",
-            min_value=1.0, value=59.5, step=0.5
+            min_value=1.0, value=round(ft_sheet_tgt * 7, 2), step=0.5,
+            key=f"ft_weekly_{file_sig}",
+            help="Defaulted from the daily target row in the attendance sheet."
         )
         daily_target = round(target_weekly / 7, 10)
 
         st.divider()
         st.subheader("🕑 Part-Time Settings")
         pt_daily_target = st.number_input(
-            "Part-Time Daily Target (hrs)", min_value=0.5, value=4.0, step=0.5
+            "Part-Time Daily Target (hrs)", min_value=0.5, value=float(pt_sheet_tgt), step=0.5,
+            key=f"pt_daily_{file_sig}",
+            help="Defaulted from the daily target row in the attendance sheet."
         )
         st.caption(
-            "Upload a reusable Part-Time Master (columns: ID, Name) once — "
-            "re-upload the same file each month instead of re-selecting from a list."
+            "Part-time is read from the sheet: anyone whose daily target is below the "
+            "full-time target. Change it in the sheet to change it here."
         )
-
-        pt_tmpl_col, pt_upl_col = st.columns([1, 2])
-        pt_tmpl_col.download_button(
-            "📄 Template", make_parttime_template(),
-            "part_time_master_template.xlsx", key="pt_template_dl"
-        )
-        pt_file = pt_upl_col.file_uploader(
-            "Upload Part-Time Master", type=["xlsx", "csv"], key="pt_upload"
-        )
-        if pt_file is not None:
-            pt_parsed_ids, pt_parsed_names, pt_skipped = parse_id_name_file(pt_file)
-            if pt_parsed_ids:
-                st.session_state.part_time_ids.update(pt_parsed_ids)
-                # A checkbox's key="pt_<uid>" only honors value=... on the
-                # very first render for that key — every rerun after that,
-                # Streamlit ignores value= and reuses whatever's already in
-                # session_state[key], which the loop below then writes
-                # straight back into part_time_ids. Without this, a fresh
-                # upload's new IDs would get silently discarded again the
-                # moment the checkbox loop runs on this same rerun.
-                for u in active_employees:
-                    if raw_records[u]['id'] in pt_parsed_ids:
-                        st.session_state[f"pt_{u}"] = True
-                st.success(f"✅ Loaded {len(pt_parsed_ids)} part-time employee ID(s).")
-                known_ids = {raw_records[u]['id'] for u in active_employees}
-                unmatched = [eid for eid in pt_parsed_ids if eid not in known_ids]
-                if unmatched:
-                    st.warning(
-                        "⚠️ These IDs from the part-time file don't match any employee "
-                        "in this month's attendance data: "
-                        + ", ".join(f"{eid} ({pt_parsed_names.get(eid, '?')})" for eid in unmatched)
-                    )
-            else:
-                st.warning("⚠️ No valid ID/Name rows found in the uploaded file.")
-
-            if pt_skipped:
-                with st.expander(f"⚠️ {len(pt_skipped)} row(s) in the file couldn't be read"):
-                    for row_num, eid, reason in pt_skipped:
-                        st.write(f"Row {row_num} (ID: {eid}): {reason}")
-
-        if st.button("🔄 Reset part-time list (clear all)"):
-            st.session_state.part_time_ids = set()
-            for u in active_employees:
-                st.session_state.pop(f"pt_{u}", None)
-            st.rerun()
-
-        with st.expander("✏️ Manually set / override part-time employees"):
-            for uid in active_employees:
-                eid     = raw_records[uid]['id']
-                checked = st.checkbox(
-                    raw_records[uid]['name'].title(),
-                    value=(eid in st.session_state.part_time_ids),
-                    key=f"pt_{uid}"
-                )
-                if checked:
-                    st.session_state.part_time_ids.add(eid)
-                else:
-                    st.session_state.part_time_ids.discard(eid)
-
-        part_time_list = [uid for uid in active_employees
-                           if raw_records[uid]['id'] in st.session_state.part_time_ids]
-
         if part_time_list:
             st.caption(
-                "**Currently part-time (" + str(len(part_time_list)) + "):** "
+                "**Part-time (" + str(len(part_time_list)) + "):** "
                 + ", ".join(raw_records[u]['name'].title() for u in part_time_list)
             )
         else:
-            st.caption("No employees currently marked part-time.")
+            st.caption("No part-time employees found in the sheet.")
 
         st.divider()
         st.subheader("🏖️ Office Holidays")
@@ -1229,8 +1438,7 @@ def main():
         st.divider()
         st.subheader("💰 Salary Settings")
         st.caption(
-            "Upload a reusable Salary Master (columns: ID, Name, Monthly Salary) once — "
-            "just re-upload the same file each month instead of retyping salaries. "
+            "Monthly salary is the Basic Salary from the salary sheet, matched by name. "
             "Days-based payroll formula: Sal Per Day = Salary ÷ Days in Month; "
             "Gross Salary = Sal Per Day × (Days in Month − Leave Days); "
             "Extra Sal = Net Hours (Excess − Shortage) × Sal Per Hour; "
@@ -1250,52 +1458,15 @@ def main():
             help="Same as above, for part-time employees."
         )
 
-        tmpl_col, upl_col = st.columns([1, 2])
-        tmpl_col.download_button(
-            "📄 Template", make_salary_template(),
-            "salary_master_template.xlsx", key="salary_template_dl"
-        )
-        salary_file = upl_col.file_uploader(
-            "Upload Salary Master", type=["xlsx", "csv"], key="salary_upload"
-        )
-        if salary_file is not None:
-            parsed, parsed_names, skipped_rows = parse_salary_file(salary_file)
-            if parsed:
-                st.session_state.salary_map.update(parsed)
-                st.success(f"✅ Loaded salary for {len(parsed)} employee(s).")
-                known_ids = {raw_records[u]['id'] for u in active_employees}
-                unmatched = [eid for eid in parsed if eid not in known_ids]
-                if unmatched:
-                    st.warning(
-                        "⚠️ These IDs from the salary file don't match any employee "
-                        "in this month's attendance data: "
-                        + ", ".join(f"{eid} ({parsed_names.get(eid, '?')})" for eid in unmatched)
-                    )
-            else:
-                st.warning("⚠️ No valid ID/Name/Salary rows found in the uploaded file.")
-
-            if skipped_rows:
-                with st.expander(f"⚠️ {len(skipped_rows)} row(s) in the file couldn't be read"):
-                    for row_num, eid, reason in skipped_rows:
-                        st.write(f"Row {row_num} (ID: {eid}): {reason}")
-
-        with st.expander("✏️ Manually set / override salaries"):
-            for uid in active_employees:
-                emp_id  = raw_records[uid]['id']
-                current = st.session_state.salary_map.get(emp_id, 0.0)
-                new_val = st.number_input(
-                    raw_records[uid]['name'].title(),
-                    min_value=0.0, value=float(current), step=500.0,
-                    key=f"salary_{uid}"
-                )
-                if new_val > 0:
-                    st.session_state.salary_map[emp_id] = new_val
-                elif emp_id in st.session_state.salary_map:
-                    del st.session_state.salary_map[emp_id]
 
     holiday_dates = st.session_state.holiday_dates
     wfh_records   = st.session_state.wfh_records
-    salary_map    = st.session_state.salary_map
+    salary_map    = {raw_records[u]['id']: s for u, s in salary_by_uid.items()}
+    dup_ids = {i for i in (raw_records[u]['id'] for u in active_employees)
+               if sum(raw_records[u]['id'] == i for u in active_employees) > 1}
+    if dup_ids:
+        st.error("⚠️ The same logs ID is assigned to more than one employee: "
+                 + ", ".join(sorted(dup_ids)) + ". Fix it in the match table above.")
 
     st.header("🔧 Fix Missing Punches")
     any_missing = False
